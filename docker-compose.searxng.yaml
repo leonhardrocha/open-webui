@@ -1,0 +1,35 @@
+services:  
+  searxng:
+    container_name: searxng
+    image: searxng/searxng:latest
+    pull_policy: if_not_present
+    ports:
+      - "8080:8080"
+    volumes:
+      - searxng:/etc/searxng:rw
+      - ${SEARXNG_ENV-.env}:/app/backend/${SEARXNG_ENV-.env}
+    env_file:
+      - ${OPEN_WEBUI_ENV-.env}
+    restart: unless-stopped
+    cap_drop:  ## disable at 1st run
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+    networks:
+       - quiver-network
+
+  
+volumes:
+  searxng: {}
+
+networks:
+  quiver-network:
+    external: true

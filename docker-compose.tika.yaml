@@ -1,0 +1,23 @@
+#version: "3.9"  # Adicione a versão do docker-compose para melhor compatibilidade
+
+services:
+  tika:
+    image: apache/tika:latest-full
+    restart: unless-stopped
+    container_name: tika
+    hostname: tika
+    ports:
+      - 9998:9998
+    volumes:
+      - tika:/etc/tika:rw
+    env_file:
+      - .env
+    networks:
+      - quiver-network
+
+volumes:  # Defina o volume nomeado 'tika'
+  tika:
+
+networks:
+  quiver-network:
+    external: true

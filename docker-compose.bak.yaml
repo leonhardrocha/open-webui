@@ -1,0 +1,67 @@
+services:
+  ollama:
+    volumes:
+      - ollama:/root/.ollama
+      - ${OLLAMA_ENV-.env}:/root/${OLLAMA_ENV-.env}
+    environment:
+      - name=value
+    container_name: ollama
+    pull_policy: if_not_present
+    tty: true
+    restart: unless-stopped
+    image: ollama/ollama:${OLLAMA_DOCKER_TAG-latest}        
+
+  open-webui:
+    build:
+      context: .
+      args:
+        OLLAMA_BASE_URL: '/ollama'
+      dockerfile: Dockerfile
+    image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-latest}
+    pull_policy: if_not_present
+    container_name: open-webui
+    volumes:
+      - open-webui:/app/backend/data
+      - ${OPEN_WEBUI_ENV-.env}:/app/backend/${OPEN_WEBUI_ENV-.env}
+
+    depends_on:
+      - ollama
+    ports:
+      - ${OPEN_WEBUI_PORT-3000}:8080
+    env_file:
+      - ${OPEN_WEBUI_ENV-.env}
+    # extra_hosts:
+    #   - host.docker.internal:host-gateway
+    restart: unless-stopped
+    entrypoint: /bin/bash
+
+
+  searxng:
+    container_name: searxng
+    image: searxng/searxng:latest
+    pull_policy: if_not_present
+    ports:
+      - "8080:8080"
+    volumes:
+      - searxng:/etc/searxng:rw
+      - ${SEARXNG_ENV-.env}:/app/backend/${SEARXNG_ENV-.env}
+    env_file:
+      - ${OPEN_WEBUI_ENV-.env}
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+  
+volumes:
+  ollama: {}
+  open-webui: {}
+  searxng: {}

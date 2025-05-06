@@ -1,0 +1,46 @@
+services:
+  ollama:
+    volumes:
+      - ollama:/root/.ollama
+    container_name: ollama
+    pull_policy: always
+    tty: true
+    restart: unless-stopped
+    image: ollama/ollama:${OLLAMA_DOCKER_TAG-latest}
+    networks:
+      - quiver-network
+
+  open-webui:
+    build:
+      context: .
+      args:
+        OLLAMA_BASE_URL: '/ollama'
+      dockerfile: Dockerfile
+    image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-main}
+    container_name: open-webui
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      - ollama
+    ports:
+      - ${OPEN_WEBUI_PORT-3000}:8080
+    environment:
+      ENABLE_RAG_LOCAL_WEB_FETCH: true
+      OLLAMA_BASE_URL: 'http://ollama:11434'
+      WEBUI_SECRET_KEY: ''
+      ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION: true
+      RAG_WEB_SEARCH_TRUST_ENV: true
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+    networks:
+      - quiver-network
+
+volumes:
+  ollama: {}
+  open-webui: {}
+
+networks:
+  quiver-network:
+    external: true
+    

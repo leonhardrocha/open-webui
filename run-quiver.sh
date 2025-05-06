@@ -9,6 +9,14 @@ NC='\033[0m' # No Color
 # Unicode character for tick mark
 TICK='\u2713'
 
+connect_ollama_to_dify_network() {
+    echo "Connecting ollama to docker_network (DIFY main network)"
+    eval "docker network connect docker_network ollama || echo -e \"${RED}${BOLD}There was an error connecting ollama to docker_network.${NC}\""
+    echo "Connecting ollama to docker_ssrf_proxy_network (DIFY proxy network)"
+    eval "docker network connect docker_ssrf_proxy_network ollama || echo -e \"${RED}${BOLD}There was an error connecting ollama to docker_ssrf_proxy_network.${NC}\""
+}
+
+
 # Detect GPU driver
 get_gpu_driver() {
     # Detect NVIDIA GPUs using lspci or nvidia-smi
@@ -75,6 +83,9 @@ usage() {
     echo "  --webui[port=PORT]         Set the port for the web user interface."
     echo "  --data[folder=PATH]        Bind mount for ollama data folder (by default will create the 'ollama' volume)."
     echo "  --playwright               Enable Playwright support for web scraping."
+    echo "  --searxng                  Enable SearXNG server support for web search."
+    echo "  --a1111                    Enable Automate1111 support for image generation."    
+    echo "  --tika                     Enable Apache Tika support for better document scraping."    
     echo "  --build                    Build the docker image before running the compose project."
     echo "  --drop                     Drop the compose project."
     echo "  -q, --quiet                Run script in headless mode."
@@ -102,6 +113,10 @@ headless=false
 build_image=false
 kill_compose=false
 enable_playwright=false
+enable_tika=false
+enable_a1111=false
+enable_searxng=false
+enable_api=true
 
 # Function to extract value from the parameter
 extract_value() {
@@ -134,6 +149,15 @@ while [[ $# -gt 0 ]]; do
         --playwright)
             enable_playwright=true
             ;;
+        --tika)
+            enable_tika=true
+            ;;
+        --a1111)
+            enable_a1111=true
+            ;;
+        --searxng)
+            enable_searxng=true
+            ;;
         --drop)
             kill_compose=true
             ;;
@@ -162,7 +186,7 @@ if [[ $kill_compose == true ]]; then
     echo -e "${GREEN}${BOLD}Compose project dropped successfully.${NC}"
     exit
 else
-    DEFAULT_COMPOSE_COMMAND="docker compose -f docker-compose.yaml"
+    DEFAULT_COMPOSE_COMMAND="docker compose -f docker-compose.quiver.yaml"
     if [[ $enable_gpu == true ]]; then
         # Validate and process command-line arguments
         if [[ -n $gpu_count ]]; then
@@ -182,6 +206,7 @@ else
         if [[ -n $api_port ]]; then
             export OLLAMA_WEBAPI_PORT=$api_port # Set OLLAMA_WEBAPI_PORT environment variable
         fi
+        echo "Enabling Ollama APi at port $OLLAMA_WEBAPI_PORT"
     fi
     if [[ -n $data_dir ]]; then
         DEFAULT_COMPOSE_COMMAND+=" -f docker-compose.data.yaml"
@@ -190,6 +215,16 @@ else
     if [[ $enable_playwright == true ]]; then
         DEFAULT_COMPOSE_COMMAND+=" -f docker-compose.playwright.yaml"
     fi
+        if [[ $enable_searxng == true ]]; then
+        DEFAULT_COMPOSE_COMMAND+=" -f docker-compose.searxng.yaml"
+    fi
+    if [[ $enable_tika == true ]]; then
+        DEFAULT_COMPOSE_COMMAND+=" -f docker-compose.tika.yaml"
+    fi
+    if [[ $enable_a1111 == true ]]; then
+        DEFAULT_COMPOSE_COMMAND+=" -f docker-compose.a1111.yaml"
+    fi
+
     if [[ -n $webui_port ]]; then
         export OPEN_WEBUI_PORT=$webui_port # Set OPEN_WEBUI_PORT environment variable
     fi
@@ -224,6 +259,10 @@ fi
 echo
 
 if [[ $choice == "" || $choice == "y" ]]; then
+
+    # create the quiver-network
+    eval "docker network create quiver-network"
+    
     # Execute the command with the current user
     eval "$DEFAULT_COMPOSE_COMMAND" &
 
@@ -240,6 +279,7 @@ if [[ $choice == "" || $choice == "y" ]]; then
     # Check exit status
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}${BOLD}Compose project started successfully.${NC}"
+        $(connect_ollama_to_dify_network)
     else
         echo -e "${RED}${BOLD}There was an error starting the compose project.${NC}"
     fi
