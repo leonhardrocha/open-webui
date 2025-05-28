@@ -10,8 +10,8 @@ NC='\033[0m' # No Color
 TICK='\u2713'
 
 connect_ollama_to_dify_network() {
-    echo "Connecting ollama to docker_network (DIFY main network)"
-    eval "docker network connect docker_network ollama || echo -e \"${RED}${BOLD}There was an error connecting ollama to docker_network.${NC}\""
+    echo "Connecting ollama to docker_default (DIFY main network)"    
+    eval "docker network connect docker_default ollama || echo -e \"${RED}${BOLD}There was an error connecting ollama to docker_default.${NC}\""
     echo "Connecting ollama to docker_ssrf_proxy_network (DIFY proxy network)"
     eval "docker network connect docker_ssrf_proxy_network ollama || echo -e \"${RED}${BOLD}There was an error connecting ollama to docker_ssrf_proxy_network.${NC}\""
 }
@@ -260,8 +260,6 @@ echo
 
 if [[ $choice == "" || $choice == "y" ]]; then
 
-    # create the quiver-network
-    eval "docker network create quiver-network"
     
     # Execute the command with the current user
     eval "$DEFAULT_COMPOSE_COMMAND" &
@@ -279,6 +277,8 @@ if [[ $choice == "" || $choice == "y" ]]; then
     # Check exit status
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}${BOLD}Compose project started successfully.${NC}"
+        # create the quiver-network
+        eval "docker network create quiver-network || echo -e \"${RED}${BOLD}There was an error creating the quiver-network or already exists.${NC}\""
         $(connect_ollama_to_dify_network)
     else
         echo -e "${RED}${BOLD}There was an error starting the compose project.${NC}"

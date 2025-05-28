@@ -1,3 +1,7 @@
+## Ollama data
+ollama-data/
+data/
+
 .DS_Store
 node_modules
 /build
