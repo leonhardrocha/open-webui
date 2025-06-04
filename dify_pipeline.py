@@ -11,7 +11,7 @@ import os
 import requests
 import json
 import time
-from typing import List, Union, Generator, Iterator, Optional, Callable, Any, Dict
+from typing import List, Union, Generator, Iterator, Optional, Callable, Any, Dict, AsyncGenerator
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import pop_system_message
 from open_webui.config import UPLOAD_DIR
@@ -20,6 +20,7 @@ import tempfile
 import asyncio
 import dotenv
 import aiohttp
+
 
 # (EventEmitter class definition as provided in the template notes)
 class EventEmitter:
@@ -67,13 +68,18 @@ class Tools:
         # Environment variable settings
         DIFY_BASE_URL: str = Field(
             default="http://localhost/v1",
-            description="Base URL for the Dify API (e.g., http://localhost/v1).",
+            description="Optional: Base URL for the Dify API (default: http://localhost/v1).",
+        )
+        WEBUI_BASE_URL: str = Field(
+            default="http://localhost/v1",
+            description="Optional: Base URL for the OpenWebUI API (default: http://localhost:3000/).",
         )
         DIFY_USER: str = Field(
             default="",
             description="Optional: Username used in Dify workflow, defaults to user´s email.",
         )
-        DIFY_APIKEY: str = Field(default="", description="Your Dify API Key.")
+        DIFY_KEY: str = Field(default="", description="Your Dify API Key.")
+        WEBUI_KEY: str = Field(default="", description="Your OpenWebUI API Key.")
 
     def __init__(self):
         self.citation = True
@@ -82,52 +88,113 @@ class Tools:
         self.name = "Deep Research"
 
         # Initialize valves with environment variables, providing a default DIFY_KEY for testing
-        # It's highly recommended to set DIFY_KEY as an environment variable in your OpenWebUI environment for security.
         self.valves = self.Valves(
             **{
                 "DIFY_KEY": os.getenv("DIFY_KEY", "app-05EAqfax9bXXxUuT9EgMao6p"),
+                "WEBUI_KEY": os.getenv("WEBUI_KEY", "app-05EAqfax9bXXxUuT9EgMao6p"),
                 "DIFY_BASE_URL": os.getenv("DIFY_BASE_URL", "http://localhost/v1"),
+                "WEBUI_BASE_URL": os.getenv("WEBUI_BASE_URL", "http://localhost:3000/"),
                 "DIFY_USER": os.getenv("DIFY_USER", "leonardo_rocha"),
             }
         )
 
-
-        self.dify = DifyHelper(self.valves)
+        self.openwebui = OpenWebUIHelper(self.valves)
+        self.dify = DifyHelper(self.valves)        
         self.dify.load_state()
 
-    async def research(
+    async def research_stream(
         self, 
         query: str,
-        __event_emitter__: Callable[[dict], Any]) -> str:
+        __event_emitter__: Optional[Callable[[dict], Any]] = None) -> str:
         """
-        Researches based on the input string.
+        Researches based on the input string.   
         
         :param query: The query to research.
         :return: The research result.
         """
         event_emitter = EventEmitter(__event_emitter__)
         await event_emitter.progress_update("Researching...")
-        if self.valves.DIFY_APIKEY is None:
-            error_result = "Error: DIFY_APIKEY is not set"
+        
+        if not self.valves.DIFY_KEY:
+            error_result = "Error: DIFY_KEY is not set"
+            await event_emitter.error_update(error_result)
+            return error_result
+        
+        try:
+            result_parts = []
+            async for chunk in self.dify.send_chat_message(query):
+                if chunk.get('type') == 'message':
+                    result_parts.append(chunk.get('content', ''))
+                elif chunk.get('type') == 'error':
+                    error_result = f"Error: {chunk.get('message', 'Unknown error occurred')}"
+                    await event_emitter.error_update(error_result)
+                    return error_result
+            
+            if not result_parts:
+                error_result = "Error: No response content received"
+                await event_emitter.error_update(error_result)
+                return error_result
+                
+            result = ''.join(result_parts)
+            await event_emitter.success_update("Researching complete.")
+            return result
+            
+        except Exception as e:
+            error_result = f"Error during research: {str(e)}"
+            await event_emitter.error_update(error_result)
+            return error_result
+
+    async def research(
+        self, 
+        query: str,
+        __event_emitter__: Optional[Callable[[dict], Any]] = None) -> str:
+        """
+        Researches based on the input string.   
+        
+        :param query: The query to research.
+        :return: The research result.
+        """
+        event_emitter = EventEmitter(__event_emitter__)
+        await event_emitter.progress_update("Researching...")
+        if self.valves.DIFY_KEY is None:
+            error_result = "Error: DIFY_KEY is not set"
             await event_emitter.error_update(error_result)
             return error_result
         else:
-            models = await self._get_models()
-            if models is None:
-                error_result = "Error: No models found"
+            result = await self.dify.send_chat_message(query)
+            if result is None:
+                error_result = "Error: Could not get completion"
                 await event_emitter.error_update(error_result)
                 return error_result
             else:
-                result = await self._get_completion(query)
-                if result is None:
-                    error_result = "Error: Could not get completion"
-                    await event_emitter.error_update(error_result)
-                    return error_result
-                else:
-                    await event_emitter.success_update("Researching complete.")
-                    return result
+                await event_emitter.success_update("Researching complete.")
+                return result
     
-    async def _get_completion(self, query: str) -> Optional[str]:
+class OpenWebUIHelper:
+
+    def __init__(self, valves: Tools.Valves):
+        self.valves = valves
+
+    async def get_models(self) -> Optional[List[Dict[str, Any]]]:
+            """
+            Get the list of models from the Dify API.
+            
+            :return: The list of models or None if there was an error.
+            """
+            response = requests.get(
+                url=f"{self.valves.WEBUI_BASE_URL}/api/models",
+                headers={
+                    "Authorization": f"Bearer {self.valves.WEBUI_KEY}",
+                },
+            )
+            if response.status_code != 200:
+                error_result = f"Error: {response.text}"
+                return None
+            else:
+                result = response.json()
+                return result["models"]
+
+    async def get_completion(self, query: str) -> Optional[str]:
         """
         Posts to the Dify API to get the completion of the query.
         
@@ -137,46 +204,14 @@ class Tools:
         response = requests.post(
             url=f"{self.valves.DIFY_BASE_URL}/api/chat/completions",
             headers={
-                "Authorization": f"Bearer {self.valves.DIFY_APIKEY}",
+                "Authorization": f"Bearer {self.valves.DIFY_KEY}",
             },
-            json={
-                "model": "deepseek-r1:latest",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": query
-                    }
-                ]
-            }
+            json=query
         )    
         if response.status_code != 200:
             return None
         else:
-            return response.json()["choices"][0]["message"]["content"]
-
-
-    async def _get_models(self) -> Optional[List[Dict[str, Any]]]:
-        """
-        Get the list of models from the Dify API.
-        
-        :return: The list of models or None if there was an error.
-        """
-        response = requests.get(
-            url=f"{self.valves.DIFY_BASE_URL}/api/models",
-            headers={
-                "Authorization": f"Bearer {self.valves.DIFY_APIKEY}",
-            },
-        )
-        if response.status_code != 200:
-            error_result = f"Error: {response.text}"
-            await event_emitter.error_update(error_result)
-            return None
-        else:
-            result = response.json()
-            await event_emitter.success_update("Listing models.")
-            return result["models"]
-
-    
+            return response["choices"][0]["message"]["content"]
 
 
 class DifyHelper:
@@ -218,7 +253,6 @@ class DifyHelper:
 
         self.data_cache_dir = "data/dify"
 
-
     def get_file_extension(self, file_name: str) -> str:
         """
         Gets the file extension.
@@ -238,103 +272,10 @@ class DifyHelper:
                     return cell.cell_contents
         return None
 
-    async def get_messages(
-        self,
-        conversation_id: str,
-        user: str,
-        first_id: Optional[str] = None,
-        limit: int = 20,
-    ) -> dict:
-        """Gets conversation history messages from Dify.
-
-        Args:
-            conversation_id: The ID of the conversation.
-            user: User identifier.
-            first_id: The ID of the first chat record on the current page (for pagination).
-            limit: How many chat history messages to return in one request.
-
-        Returns:
-            A dictionary containing the response from the Dify /messages endpoint.
-        """
-        endpoint = f"{self.valves.DIFY_BASE_URL}/messages"
-        headers = {
-            "Authorization": f"Bearer {self.valves.DIFY_APIKEY}",
-            "Content-Type": "application/json",
-        }
-        params = {
-            "conversation_id": conversation_id,
-            "user": user,
-            "limit": limit,
-        }
-        if first_id:
-            params["first_id"] = first_id
-
-        try:
-            response = requests.get(endpoint, headers=headers, params=params)
-            response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching messages from Dify: {e}")
-            # Optionally, re-raise the exception or return a specific error structure
-            return {"error": str(e), "data": [], "has_more": False, "limit": limit}
-
-    async def get_conversations(
-        self,
-        user: str,
-        last_id: Optional[str] = None,
-        limit: int = 20,
-        sort_by: str = "-updated_at"
-    ) -> dict:
-        """Gets the list of conversations for the current user from Dify.
-
-        Args:
-            user: User identifier, used to define the identity of the end-user.
-            last_id: The ID of the last record on the current page (for pagination).
-            limit: How many records to return in one request (1-100).
-            sort_by: Sorting field and order. Default: "-updated_at" (newest first).
-                   Options: "created_at", "-created_at", "updated_at", "-updated_at"
-
-        Returns:
-            A dictionary containing the response from the Dify /conversations endpoint.
-        """
-        # Validate limit is within allowed range (1-100)
-        limit = max(1, min(100, limit))
-        
-        endpoint = f"{self.valves.DIFY_BASE_URL}/conversations"
-        headers = {
-            "Authorization": f"Bearer {self.valves.DIFY_APIKEY}",
-            "Content-Type": "application/json",
-        }
-        
-        params = {
-            "user": user,
-            "limit": limit,
-        }
-        
-        # Add optional parameters if provided
-        if last_id is not None:
-            params["last_id"] = last_id
-        if sort_by is not None:
-            params["sort_by"] = sort_by
-            
-        try:
-            response = requests.get(endpoint, headers=headers, params=params)
-            response.raise_for_status()  # Raise an exception for HTTP errors
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching conversations from Dify: {e}")
-            # Return a consistent error structure
-            return {
-                "error": str(e),
-                "data": [],
-                "has_more": False,
-                "limit": limit
-            }
-
     async def send_chat_message(
         self,
         query: str,
-        user: str,
+        user: Optional[str] = None,
         conversation_id: Optional[str] = None,
         response_mode: str = "streaming",
         inputs: Optional[dict] = None,
@@ -357,9 +298,10 @@ class DifyHelper:
         Yields:
             Dictionary containing event data from the streaming response.
         """
+        user = user or self.valves.DIFY_USER
         endpoint = f"{self.valves.DIFY_BASE_URL}/chat-messages"
         headers = {
-            "Authorization": f"Bearer {self.valves.DIFY_APIKEY}",
+            "Authorization": f"Bearer {self.valves.DIFY_KEY}",
             "Content-Type": "application/json",
         }
         
@@ -413,34 +355,8 @@ class DifyHelper:
                                 event_type = event_data.get('event', 'message')
                                 
                                 # Handle different event types
-                                if event_type == 'message':
-                                    yield {
-                                        'type': 'message',
-                                        'task_id': event_data.get('task_id'),
-                                        'message_id': event_data.get('message_id'),
-                                        'conversation_id': event_data.get('conversation_id'),
-                                        'content': event_data.get('answer', ''),
-                                        'created_at': event_data.get('created_at')
-                                    }
-                                elif event_type == 'message_end':
-                                    yield {
-                                        'type': 'message_end',
-                                        'task_id': event_data.get('task_id'),
-                                        'message_id': event_data.get('message_id'),
-                                        'conversation_id': event_data.get('conversation_id'),
-                                        'metadata': event_data.get('metadata', {}),
-                                        'usage': event_data.get('usage', {}),
-                                        'retriever_resources': event_data.get('retriever_resources', [])
-                                    }
-                                elif event_type == 'error':
-                                    yield {
-                                        'type': 'error',
-                                        'status': event_data.get('status'),
-                                        'code': event_data.get('code'),
-                                        'message': event_data.get('message')
-                                    }
-                                # Add more event handlers as needed
-                                
+                                self.handle_event(event_data, event_type, streaming = True)
+
                             except json.JSONDecodeError as e:
                                 print(f"Failed to parse event data: {line}")
                                 continue
@@ -460,6 +376,37 @@ class DifyHelper:
                 'event': 'error',
                 'message': f"Unexpected error: {str(e)}"
             }
+
+    def handle_event(self, event_data: dict, event_type: str):
+        """Handle different event types"""
+        if event_type == 'message':
+            yield {
+                'type': 'message',
+                'task_id': event_data.get('task_id'),
+                'message_id': event_data.get('message_id'),
+                'conversation_id': event_data.get('conversation_id'),
+                'content': event_data.get('answer', ''),
+                'created_at': event_data.get('created_at')
+            }
+        elif event_type == 'message_end':
+            yield {
+                'type': 'message_end',
+                'task_id': event_data.get('task_id'),
+                'message_id': event_data.get('message_id'),
+                'conversation_id': event_data.get('conversation_id'),
+                'metadata': event_data.get('metadata', {}),
+                'usage': event_data.get('usage', {}),
+                'retriever_resources': event_data.get('retriever_resources', [])
+            })
+        elif event_type == 'error':
+            yield {
+                'type': 'error',
+                'status': event_data.get('status'),
+                'code': event_data.get('code'),
+                'message': event_data.get('message')
+            }
+        # Add more event handlers as needed
+    
 
     def save_state(self):
         """Persists Dify related state variables to file."""
@@ -533,7 +480,7 @@ class DifyHelper:
         """
         url = f"{self.valves.DIFY_BASE_URL}/files/upload"
         headers = {
-            "Authorization": f"Bearer {self.valves.DIFY_APIKEY}",
+            "Authorization": f"Bearer {self.valves.DIFY_KEY}",
         }
 
         file_name = os.path.basename(file_path)
@@ -843,42 +790,28 @@ class DifyHelper:
                     )
 
 
-def chat_with_model(token):
-    url = 'http://localhost:3000/api/chat/completions'
-    headers = {
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
-    }
-    data = {
-      "model": "granite3.1-dense:8b",
-      "messages": [
-        {
-          "role": "user",
-          "content": "Why is the sky blue?"
-        }
-      ]
-    }
-    response = requests.post(url, headers=headers, json=data)
-    return response.json()
-
 
 if __name__ == "__main__":
     
     dotenv.load_dotenv()
-    token = os.getenv("DIFY_APIKEY", None)
+    token = os.getenv("DIFY_KEY", None)
     if token is None:
-        raise ValueError("DIFY_APIKEY is not set")
-    response = chat_with_model(token)
-    print(response)
+        raise ValueError("DIFY_KEY is not set")
     tools = Tools()
     query = {
-        "model": "deepseek-r1:latest",
-        "messages": [
+        "inputs": {},
+        "query": "What are the specs of the iPhone 13 Pro Max?",
+        "response_mode": "streaming",
+        "conversation_id": "",
+        "user": "abc-123",
+        "files": [
             {
-                "role": "user",
-                "content": "Why is the sky blue?"
+                "type": "image",
+                "transfer_method": "remote_url",
+                "url": "https://cloud.dify.ai/logo/logo-site.png"
             }
         ]
     }
 
-    asyncio.run(tools.research(query))
+    result = asyncio.run(tools.research_stream(query))
+    print(result)
