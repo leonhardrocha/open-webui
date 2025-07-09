@@ -10,7 +10,7 @@
 import os
 import requests
 import json
-import time
+import logging
 from typing import List, Union, Generator, Iterator, Optional, Callable, Any, Dict, AsyncGenerator
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import pop_system_message
@@ -24,36 +24,53 @@ import aiohttp
 
 # (EventEmitter class definition as provided in the template notes)
 class EventEmitter:
-    def __init__(self, event_emitter: Callable[[dict], Any] = None):
+    def __init__(self, event_emitter: Callable[[dict], Any] = None, debug: bool = False):
         self.event_emitter = event_emitter
+        self.debug = debug
+        ## setup file logging
+        self.logger = logging.getLogger("EventEmitter")
+        if debug:
+            print("EventEmitter initialized with debug mode enabled.")
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
+        handler = logging.FileHandler("event_emitter.log")
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
+        
 
     async def progress_update(self, description: str):
-        await self.emit(description)
+        await self.emit(description, status="in_progress", done=False, hidden=False)
+        self.logger.info(f"Progress: {description}")
 
     async def error_update(self, description: str):
-        await self.emit(description, "error", True)
+        await self.emit(description, status="error", done=True, hidden=False)
+        self.logger.error(f"Error: {description}")
 
     async def success_update(self, description: str):
-        await self.emit(description, "success", True)
+        await self.emit(description, status="success", done=True, hidden=True)
+        self.logger.info(f"Success: {description}")
 
     async def emit(
         self,
         description: str = "Unknown State",
-        status: str = "in_progress",
+        status: str = "Unknown",
         done: bool = False,
+        hidden: bool = False,
     ):
         if self.event_emitter:
-            await self.event_emitter(
-                {
+            event = {
                     "type": "status",
                     "data": {
                         "status": status,
                         "description": description,
                         "done": done,
+                        "hidden": hidden
                     },
                 }
-            )
-
+            await self.event_emitter(event)
+            self.logger.debug(f"EventEmitter: {event}")
 
 
 class Tools:
@@ -80,26 +97,36 @@ class Tools:
         )
         DIFY_KEY: str = Field(default="", description="Your Dify API Key.")
         WEBUI_KEY: str = Field(default="", description="Your OpenWebUI API Key.")
+        DEBUG: bool = Field(default=False, description="Enable debug mode.")
 
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         self.citation = True
         self.type = "manifold"
         self.id = "deep_research"
-        self.name = "Deep Research"
-
+        self.name = "Deep Research"        
         # Initialize valves with environment variables, providing a default DIFY_KEY for testing
         self.valves = self.Valves(
             **{
                 "DIFY_KEY": os.getenv("DIFY_KEY", "app-05EAqfax9bXXxUuT9EgMao6p"),
-                "WEBUI_KEY": os.getenv("WEBUI_KEY", "app-05EAqfax9bXXxUuT9EgMao6p"),
+                "WEBUI_KEY": os.getenv("WEBUI_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjdjNjAyZDMyLTI4ZDUtNGYyMi1hYzQzLTc0YWNkODA1MTMzNSJ9.s_sYh3SeTiNBTr4w4pBP4OcHcRNXIkqdEMdfQ8d4X0E"),
                 "DIFY_BASE_URL": os.getenv("DIFY_BASE_URL", "http://localhost/v1"),
                 "WEBUI_BASE_URL": os.getenv("WEBUI_BASE_URL", "http://localhost:3000/"),
                 "DIFY_USER": os.getenv("DIFY_USER", "leonardo_rocha"),
             }
         )
-
-        self.openwebui = OpenWebUIHelper(self.valves)
-        self.dify = DifyHelper(self.valves)        
+        self.debug = debug or self.valves.DEBUG
+        self.logger = logging.getLogger("Tools")
+        if self.debug:
+            print("Tools initialized with debug mode enabled.")
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
+        handler = logging.FileHandler("tools.log")
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
+        self.openwebui = OpenWebUIHelper(self.valves, debug=self.debug)
+        self.dify = DifyHelper(self.valves, debug=self.debug)        
         self.dify.load_state()
 
     async def research_stream(
@@ -112,12 +139,13 @@ class Tools:
         :param query: The query to research.
         :return: The research result.
         """
-        event_emitter = EventEmitter(__event_emitter__)
+        event_emitter = EventEmitter(__event_emitter__, debug=self.debug)
         await event_emitter.progress_update("Researching...")
         
         if not self.valves.DIFY_KEY:
             error_result = "Error: DIFY_KEY is not set"
             await event_emitter.error_update(error_result)
+            self.logger.error(error_result)
             return error_result
         
         try:
@@ -132,16 +160,22 @@ class Tools:
             
             if not result_parts:
                 error_result = "Error: No response content received"
+                self.logger.error(error_result)
                 await event_emitter.error_update(error_result)
                 return error_result
                 
             result = ''.join(result_parts)
-            await event_emitter.success_update("Researching complete.")
+            if result:
+                self.logger.debug("Researching complete with result: {}".format(result))
+            else:
+                self.logger.debug("Researching complete with no result.")
+            await event_emitter.success_update("Researching complete.")            
             return result
             
         except Exception as e:
             error_result = f"Error during research: {str(e)}"
             await event_emitter.error_update(error_result)
+            self.logger.error(error_result)
             return error_result
 
     async def research(
@@ -154,45 +188,60 @@ class Tools:
         :param query: The query to research.
         :return: The research result.
         """
-        event_emitter = EventEmitter(__event_emitter__)
+        event_emitter = EventEmitter(__event_emitter__, debug = self.debug)
         await event_emitter.progress_update("Researching...")
         if self.valves.DIFY_KEY is None:
             error_result = "Error: DIFY_KEY is not set"
             await event_emitter.error_update(error_result)
+            self.logger.error(error_result)
             return error_result
         else:
             result = await self.dify.send_chat_message(query)
             if result is None:
                 error_result = "Error: Could not get completion"
                 await event_emitter.error_update(error_result)
+                self.logger.error(error_result)
                 return error_result
             else:
                 await event_emitter.success_update("Researching complete.")
+                self.logger.info("Researching complete.")
                 return result
     
 class OpenWebUIHelper:
 
-    def __init__(self, valves: Tools.Valves):
+    def __init__(self, valves: Tools.Valves, debug: bool = False):
         self.valves = valves
+        self.logger = logging.getLogger("OpenWebUIHelper")
+        if debug:
+            print("OpenWebUIHelper initialized with debug mode enabled.")
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
+        handler = logging.FileHandler("openwebui_helper.log")
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
 
     async def get_models(self) -> Optional[List[Dict[str, Any]]]:
-            """
-            Get the list of models from the Dify API.
-            
-            :return: The list of models or None if there was an error.
-            """
-            response = requests.get(
-                url=f"{self.valves.WEBUI_BASE_URL}/api/models",
-                headers={
-                    "Authorization": f"Bearer {self.valves.WEBUI_KEY}",
-                },
-            )
-            if response.status_code != 200:
-                error_result = f"Error: {response.text}"
-                return None
-            else:
-                result = response.json()
-                return result["models"]
+        """
+        Get the list of models from the Dify API.
+        
+        :return: The list of models or None if there was an error.
+        """
+        response = requests.get(
+            url=f"{self.valves.WEBUI_BASE_URL}/api/models",
+            headers={
+                "Authorization": f"Bearer {self.valves.WEBUI_KEY}",
+            },
+        )
+        if response.status_code != 200:
+            error_result = f"Error: {response.text}"
+            self.logger.error(error_result)
+            return None
+        else:
+            result = response.json()
+            self.logger.info("Models retrieved successfully.")
+            return result["models"]
 
     async def get_completion(self, query: str) -> Optional[str]:
         """
@@ -209,6 +258,8 @@ class OpenWebUIHelper:
             json=query
         )    
         if response.status_code != 200:
+            error_result = f"Error: {response.text}"
+            self.logger.error(error_result)
             return None
         else:
             return response["choices"][0]["message"]["content"]
@@ -216,7 +267,7 @@ class OpenWebUIHelper:
 
 class DifyHelper:
 
-    def __init__(self, valves: Tools.Valves):
+    def __init__(self, valves: Tools.Valves, debug: bool = False):
         # Storage format for mapping OpenWebUI chat/message IDs to Dify IDs:
         # {
         #   "chat_id_1": {
@@ -225,6 +276,17 @@ class DifyHelper:
         #   }
         # }
         self.valves = valves
+        self.debug = debug
+        self.logger = logging.getLogger("DifyHelper")
+        if debug:
+            print("DifyHelper initialized with debug mode enabled.")
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
+        handler = logging.FileHandler("dify_helper.log")
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
         self.chat_message_mapping = {}
 
         # Storage format for keeping track of the Dify model used per chat:
@@ -258,6 +320,7 @@ class DifyHelper:
         Gets the file extension.
         os.path.splitext(file_name) returns a tuple, the first element is the filename, the second is the extension.
         """
+        self.logger.info(f"Getting file extension for {file_name}")
         return os.path.splitext(file_name)[1].strip(".")
 
     # Black magic: get closure variables from __event_emitter__
@@ -266,6 +329,7 @@ class DifyHelper:
         Retrieves closure variables from a function, specifically looking for a dictionary.
         This is used to extract chat_id and message_id from the __event_emitter__ closure.
         """
+        self.logger.info("Getting closure info")
         if hasattr(func, "__closure__") and func.__closure__:
             for cell in func.__closure__:
                 if isinstance(cell.cell_contents, dict):
@@ -335,32 +399,36 @@ class DifyHelper:
                             'message': f"API request failed with status {response.status}: {error_msg}"
                         }
                         return
-                    
+                    self.logger.info("API request successful.")
                     # For blocking mode, just return the JSON response
                     if response_mode == "blocking":
                         result = await response.json()
+                        self.logger.debug("Blocking mode response: %s", result)
                         yield result
                         return
                     
                     # For streaming mode, process the SSE stream
-                    buffer = ""
+                    buffer = []
                     async for line in response.content:
                         line = line.decode('utf-8').strip()
                         if not line:
                             continue
-                            
+                        buffer.append(line)
                         if line.startswith('data: '):
                             try:
                                 event_data = json.loads(line[6:])  # Remove 'data: ' prefix
                                 event_type = event_data.get('event', 'message')
                                 
                                 # Handle different event types
-                                self.handle_event(event_data, event_type, streaming = True)
+                                event = self.handle_event(event_data, event_type)
+                                if event:  # Only yield if we got an event (not ping or error)
+                                    self.logger.debug("Event response: %s", event)
+                                    yield event
 
                             except json.JSONDecodeError as e:
-                                print(f"Failed to parse event data: {line}")
+                                self.logger.error(f"Failed to parse event data: {line}")
                                 continue
-                    
+                    self.logger.debug("Buffer received: \n%s", "\n".join(buffer))
         except asyncio.TimeoutError:
             yield {
                 'event': 'error',
@@ -378,9 +446,9 @@ class DifyHelper:
             }
 
     def handle_event(self, event_data: dict, event_type: str):
-        """Handle different event types"""
+        """Handle different event types from Dify API"""
         if event_type == 'message':
-            yield {
+            return  {
                 'type': 'message',
                 'task_id': event_data.get('task_id'),
                 'message_id': event_data.get('message_id'),
@@ -388,8 +456,17 @@ class DifyHelper:
                 'content': event_data.get('answer', ''),
                 'created_at': event_data.get('created_at')
             }
+        elif event_type == 'message_file':
+            return  {
+                'type': 'message_file',
+                'id': event_data.get('id'),
+                'file_type': event_data.get('type'),
+                'belongs_to': event_data.get('belongs_to'),
+                'url': event_data.get('url'),
+                'conversation_id': event_data.get('conversation_id')
+            }
         elif event_type == 'message_end':
-            yield {
+            return  {
                 'type': 'message_end',
                 'task_id': event_data.get('task_id'),
                 'message_id': event_data.get('message_id'),
@@ -397,16 +474,75 @@ class DifyHelper:
                 'metadata': event_data.get('metadata', {}),
                 'usage': event_data.get('usage', {}),
                 'retriever_resources': event_data.get('retriever_resources', [])
-            })
+            }
+        elif event_type == 'tts_message':
+            return  {
+                'type': 'tts_message',
+                'task_id': event_data.get('task_id'),
+                'message_id': event_data.get('message_id'),
+                'audio': event_data.get('audio', ''),
+                'created_at': event_data.get('created_at')
+            }
+        elif event_type == 'tts_message_end':
+            return  {
+                'type': 'tts_message_end',
+                'task_id': event_data.get('task_id'),
+                'message_id': event_data.get('message_id'),
+                'audio': event_data.get('audio', ''),
+                'created_at': event_data.get('created_at')
+            }
+        elif event_type == 'message_replace':
+            return  {
+                'type': 'message_replace',
+                'task_id': event_data.get('task_id'),
+                'message_id': event_data.get('message_id'),
+                'conversation_id': event_data.get('conversation_id'),
+                'content': event_data.get('answer', ''),
+                'created_at': event_data.get('created_at')
+            }
+        elif event_type == 'workflow_started':
+            return  {
+                'type': 'workflow_started',
+                'task_id': event_data.get('task_id'),
+                'workflow_run_id': event_data.get('workflow_run_id'),
+                'data': event_data.get('data', {})
+            }
+        elif event_type == 'node_started':
+            return  {
+                'type': 'node_started',
+                'task_id': event_data.get('task_id'),
+                'workflow_run_id': event_data.get('workflow_run_id'),
+                'data': event_data.get('data', {})
+            }
+        elif event_type == 'node_finished':
+            return  {
+                'type': 'node_finished',
+                'task_id': event_data.get('task_id'),
+                'workflow_run_id': event_data.get('workflow_run_id'),
+                'data': event_data.get('data', {})
+            }
+        elif event_type == 'workflow_finished':
+            return  {
+                'type': 'workflow_finished',
+                'task_id': event_data.get('task_id'),
+                'workflow_run_id': event_data.get('workflow_run_id'),
+                'data': event_data.get('data', {})
+            }
         elif event_type == 'error':
-            yield {
+            return  {
                 'type': 'error',
+                'task_id': event_data.get('task_id'),
+                'message_id': event_data.get('message_id'),
                 'status': event_data.get('status'),
                 'code': event_data.get('code'),
                 'message': event_data.get('message')
             }
-        # Add more event handlers as needed
-    
+        elif event_type == 'ping':
+            # Just acknowledge the ping, no need to yield anything
+            print("Pong")
+        else:
+            # Log unexpected event types for debugging
+            print(f"Unhandled event type: {event_type}\ndata:{event_data}")
 
     def save_state(self):
         """Persists Dify related state variables to file."""
@@ -794,10 +930,11 @@ class DifyHelper:
 if __name__ == "__main__":
     
     dotenv.load_dotenv()
+    debug = os.getenv("DEBUG", True)
     token = os.getenv("DIFY_KEY", None)
     if token is None:
         raise ValueError("DIFY_KEY is not set")
-    tools = Tools()
+    tools = Tools(debug=debug)
     query = {
         "inputs": {},
         "query": "What are the specs of the iPhone 13 Pro Max?",
