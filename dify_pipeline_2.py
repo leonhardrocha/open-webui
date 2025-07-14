@@ -624,17 +624,41 @@ class DifyHelper:
         """
         Sends a chat message to the Dify API and handles the streaming response (SSE).
 
+        Args:
+            query: The user's input/question content (required).
+            user: User identifier, must be unique within the application (required).
+            conversation_id: To continue a conversation based on previous chat records.
+            response_mode: The mode of response return. Supported: 'streaming' or 'blocking'.
+            inputs: Variable values for the app. Contains key/value pairs for template variables.
+            files: List of file objects for multimodal understanding.
+            auto_generate_name: Whether to auto-generate conversation title.
+
         Yields:
-            Dictionary containing event data from the streaming response, normalized by handle_event.
+            Dictionary containing event data from the streaming response.
+
+        Raises:
+            ValueError: If required parameters are missing or invalid.
         """
+        # Input validation
+        if not query or not isinstance(query, str):
+            raise ValueError("Query must be a non-empty string")
+            
+        if not user and not self.valves.DIFY_USER:
+            raise ValueError("User identifier is required")
+            
+        if response_mode not in ("streaming", "blocking"):
+            raise ValueError("response_mode must be either 'streaming' or 'blocking'")
+
         user = user or self.valves.DIFY_USER
         endpoint = f"{self.valves.DIFY_BASE_URL}/chat-messages"
+        
         headers = {
             "Authorization": f"Bearer {self.valves.DIFY_KEY}",
             "Content-Type": "application/json",
-            "Accept": "text/event-stream" # Explicitly request SSE
+            "Accept": "text/event-stream" if response_mode == "streaming" else "application/json"
         }
         
+        # Prepare payload according to Dify API spec
         payload = {
             "query": query,
             "user": user,
@@ -644,12 +668,43 @@ class DifyHelper:
         }
         
         if conversation_id:
+            if not isinstance(conversation_id, str) or not conversation_id.strip():
+                raise ValueError("conversation_id must be a non-empty string")
             payload["conversation_id"] = conversation_id
             
         if files:
+            if not isinstance(files, list):
+                raise ValueError("files must be a list of file objects")
+            
+            # Validate each file object structure
+            valid_file_types = {
+                'document': {'TXT', 'MD', 'MARKDOWN', 'PDF', 'HTML', 'XLSX', 'XLS', 'DOCX', 'CSV', 'EML', 'MSG', 'PPTX', 'PPT', 'XML', 'EPUB'},
+                'image': {'JPG', 'JPEG', 'PNG', 'GIF', 'WEBP', 'SVG'},
+                'audio': {'MP3', 'M4A', 'WAV', 'WEBM', 'AMR'},
+                'video': {'MP4', 'MOV', 'MPEG', 'MPGA'},
+                'custom': set()  # Any extension is allowed for custom type
+            }
+            
+            for file_obj in files:
+                if not isinstance(file_obj, dict):
+                    raise ValueError("Each file must be a dictionary with required fields")
+                    
+                file_type = file_obj.get('type')
+                if file_type not in valid_file_types:
+                    raise ValueError(f"Invalid file type. Must be one of: {', '.join(valid_file_types.keys())}")
+                    
+                transfer_method = file_obj.get('transfer_method')
+                if transfer_method not in ('remote_url', 'local_file'):
+                    raise ValueError("transfer_method must be either 'remote_url' or 'local_file'")
+                    
+                if transfer_method == 'remote_url' and 'url' not in file_obj:
+                    raise ValueError("url is required when transfer_method is 'remote_url'")
+                elif transfer_method == 'local_file' and 'upload_file_id' not in file_obj:
+                    raise ValueError("upload_file_id is required when transfer_method is 'local_file'")
+            
             payload["files"] = files
         
-        self.logger.debug(f"Enviando payload para Dify: {json.dumps(payload, indent=2)}")
+        self.logger.debug(f"Sending payload to Dify: {json.dumps(payload, indent=2, default=str)}")
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -657,31 +712,44 @@ class DifyHelper:
                     endpoint,
                     headers=headers,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=300) # 5 minutes timeout
+                    timeout=aiohttp.ClientTimeout(total=300)  # 5 minutes timeout
                 ) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        self.logger.error(f"Dify API request falhou com status {response.status}: {error_text}")
+                        self.logger.error(f"Dify API request failed with status {response.status}: {error_text}")
+                        
                         try:
                             error_data = json.loads(error_text)
+                            error_code = error_data.get('code', '')
                             error_msg = error_data.get('message', error_text)
+                            
+                            # Map common error codes to specific exceptions
+                            if response.status == 400:
+                                if 'invalid_param' in error_code:
+                                    raise ValueError(f"Invalid parameters: {error_msg}")
+                                elif 'app_unavailable' in error_code:
+                                    raise RuntimeError("App configuration is not available")
+                                elif 'provider_not_initialize' in error_code:
+                                    raise RuntimeError("No available model credential configuration")
+                            elif response.status == 404 and 'conversation' in error_code:
+                                raise ValueError("Conversation not found")
+                            elif response.status == 429:
+                                raise RuntimeError("Rate limit exceeded. Please try again later.")
+                            
+                            raise Exception(f"API Error ({response.status}): {error_msg}")
+                            
                         except json.JSONDecodeError:
-                            error_msg = error_text
-                        
-                        yield {
-                            'type': 'error',
-                            'message': f"Erro da API Dify ({response.status}): {error_msg}"
-                        }
-                        return
-                    
-                    self.logger.info("Requisição API Dify bem-sucedida. Processando stream...")
+                            raise Exception(f"API Error ({response.status}): {error_text}")
                     
                     # For blocking mode, return the single JSON response
                     if response_mode == "blocking":
-                        result = await response.json()
-                        self.logger.debug("Resposta do modo de bloqueio Dify: %s", result)
-                        yield result
-                        return
+                        try:
+                            result = await response.json()
+                            self.logger.debug("Dify blocking mode response: %s", result)
+                            yield result
+                            return
+                        except json.JSONDecodeError as e:
+                            raise ValueError(f"Failed to parse response as JSON: {str(e)}")
                     
                     # For streaming mode, process the SSE stream
                     async for line in response.content:
@@ -691,41 +759,43 @@ class DifyHelper:
                         
                         if line.startswith('data: '):
                             try:
-                                event_data = json.loads(line[6:]) # Remove 'data: ' prefix
-                                event_type = event_data.get('event', 'message') # Dify events have an 'event' field
+                                event_data = json.loads(line[6:])  # Remove 'data: ' prefix
+                                event_type = event_data.get('event', 'message')
                                 
-                                # Process the Dify event and yield a normalized event for OpenWebUI
+                                # Process the Dify event and yield a normalized event
                                 processed_event = self.handle_event(event_data, event_type)
                                 if processed_event:
-                                    self.logger.debug(f"Evento Dify processado: {processed_event}")
+                                    self.logger.debug(f"Processed Dify event: {processed_event}")
                                     yield processed_event
+                                    
+                                # If this is an error event, log it
+                                if event_type == 'error':
+                                    self.logger.error(f"Error from Dify: {event_data.get('message', 'Unknown error')}")
+                                    
                             except json.JSONDecodeError as e:
-                                self.logger.error(f"Falha ao analisar dados do evento Dify: {line}. Erro: {e}")
+                                self.logger.error(f"Failed to parse Dify event data: {line}. Error: {e}")
                                 yield {
                                     'type': 'error',
-                                    'message': f"Falha ao analisar evento Dify: {line}. Erro: {e}"
+                                    'message': f"Failed to parse event data: {line[:100]}..."
                                 }
-                        # Dify SSE format can also include 'event: type' lines before 'data:'
-                        # We extract 'event' from within the 'data' payload, which is more reliable.
-                        # No explicit handling needed for 'event: ' lines if data: is processed.
-
+        
         except asyncio.TimeoutError:
-            self.logger.error("Requisição Dify excedeu o tempo limite após 5 minutos.")
+            self.logger.error("Dify request timed out after 5 minutes")
             yield {
                 'type': 'error',
-                'message': 'Requisição Dify excedeu o tempo limite após 5 minutos.'
+                'message': 'Request timed out after 5 minutes. Please try again.'
             }
         except aiohttp.ClientError as e:
-            self.logger.error(f"Erro de cliente HTTP ao se comunicar com Dify: {str(e)}", exc_info=True)
+            self.logger.error(f"HTTP client error while communicating with Dify: {str(e)}", exc_info=True)
             yield {
                 'type': 'error',
-                'message': f"Erro de comunicação de rede com Dify: {str(e)}"
+                'message': f"Network communication error: {str(e)}"
             }
         except Exception as e:
-            self.logger.error(f"Um erro inesperado ocorreu durante a interação com o Dify: {str(e)}", exc_info=True)
+            self.logger.error(f"Unexpected error during Dify interaction: {str(e)}", exc_info=True)
             yield {
                 'type': 'error',
-                'message': f"Um erro inesperado ocorreu durante a interação com o Dify: {str(e)}"
+                'message': f"An unexpected error occurred: {str(e)}"
             }
 
     def handle_event(self, event_data: dict, event_type: str) -> Optional[Dict[str, Any]]:
@@ -901,10 +971,37 @@ class DifyHelper:
             # Add other Dify app IDs/names if your Dify instance supports multiple or you want to expose them.
         ]
 
-    def upload_file(self, user_id: str, file_path: str, mime_type: str) -> str:
+    def upload_file(self, user_id: str, file_path: str, mime_type: str, max_size_mb: int = 10) -> str:
         """
         Uploads a file to the Dify server and returns the file ID.
+
+        Args:
+            user_id: The ID of the user uploading the file
+            file_path: Local path to the file being uploaded
+            mime_type: The MIME type of the file
+            max_size_mb: Maximum allowed file size in MB (default: 10MB)
+
+        Returns:
+            str: The file ID returned by the Dify server
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist
+            ValueError: If the file is empty or exceeds size limit
+            requests.HTTPError: For API request failures with specific error messages
         """
+        # Check if file exists and is accessible
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Check file size
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            raise ValueError("Cannot upload an empty file")
+        
+        max_size_bytes = max_size_mb * 1024 * 1024
+        if file_size > max_size_bytes:
+            raise ValueError(f"File size ({file_size / (1024*1024):.2f}MB) exceeds maximum allowed size ({max_size_mb}MB)")
+
         url = f"{self.valves.DIFY_BASE_URL}/files/upload"
         headers = {
             "Authorization": f"Bearer {self.valves.DIFY_KEY}",
@@ -912,19 +1009,50 @@ class DifyHelper:
 
         file_name = os.path.basename(file_path)
 
-        # It's crucial to open the file in binary mode 'rb' for file uploads.
-        with open(file_path, "rb") as f_data:
-            files = {
-                "file": (file_name, f_data, mime_type),
-                "user": (None, user_id),
-            }
-            self.logger.info(f"Tentando carregar arquivo para Dify: {file_name} ({mime_type}) para usuário {user_id}")
-            response = requests.post(url, headers=headers, files=files, timeout=60) # Add timeout
-            response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+        try:
+            with open(file_path, "rb") as f_data:
+                files = {
+                    "file": (file_name, f_data, mime_type),
+                    "user": (None, user_id),
+                }
+                self.logger.info(f"Uploading file to Dify: {file_name} ({mime_type}, {file_size} bytes) for user {user_id}")
+                
+                response = requests.post(url, headers=headers, files=files, timeout=60)
+                
+                # Handle specific error responses
+                if response.status_code == 400:
+                    error_data = response.json()
+                    error_code = error_data.get('code', '')
+                    if 'no_file_uploaded' in error_code:
+                        raise ValueError("No file was provided in the request")
+                    elif 'too_many_files' in error_code:
+                        raise ValueError("Only one file can be uploaded at a time")
+                    elif 'unsupported_file_type' in error_code:
+                        raise ValueError("Unsupported file type. Please check the allowed file types.")
+                elif response.status_code == 413:
+                    raise ValueError("File size exceeds the maximum allowed limit")
+                elif response.status_code == 415:
+                    raise ValueError("Unsupported file type")
+                elif response.status_code == 503:
+                    error_data = response.json()
+                    error_code = error_data.get('code', '')
+                    if 's3_connection_failed' in error_code:
+                        raise ConnectionError("Unable to connect to storage service")
+                    elif 's3_permission_denied' in error_code:
+                        raise PermissionError("Insufficient permissions to upload files")
+                    elif 's3_file_too_large' in error_code:
+                        raise ValueError("File size exceeds storage service limit")
+            
+                response.raise_for_status()  # Handle any other HTTP errors
 
-        file_id = response.json()["id"]
-        self.logger.info(f"Arquivo carregado com sucesso para Dify. ID do arquivo Dify: {file_id}")
-        return file_id
+                file_data = response.json()
+                file_id = file_data["id"]
+                self.logger.info(f"Successfully uploaded file to Dify. File ID: {file_id}")
+                return file_id
+                
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Failed to upload file: {str(e)}")
+            raise
 
     def upload_text_file(self, user_id: str, file_path: str) -> str:
         """
@@ -942,7 +1070,7 @@ class DifyHelper:
         elif ext == "xml":
             mime_type = "application/xml"
         
-        self.logger.debug(f"Carregando arquivo de texto: {file_path} com MIME type: {mime_type}")
+        self.logger.debug(f"Uploading text file: {file_path} with MIME type: {mime_type}")
         return self.upload_file(user_id, file_path, mime_type)
 
     def upload_images(self, image_url_or_base64: str, user_id: str) -> str:
@@ -962,7 +1090,7 @@ class DifyHelper:
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as temp_file:
                 temp_file.write(image_data)
                 temp_file_path = temp_file.name
-            self.logger.info(f"Imagem base64 salva temporariamente em: {temp_file_path}")
+            self.logger.info(f"Base64 image saved temporarily at: {temp_file_path}")
 
             try:
                 file_id = self.upload_file(user_id, temp_file_path, mime_type)
@@ -977,8 +1105,8 @@ class DifyHelper:
             # for that case, and the URL would be passed directly in the payload.
             # As per Dify docs, 'upload_file_id' for local_file and 'url' for remote_url,
             # so this `upload_images` is primarily for local files (incl. decoded base64).
-            self.logger.warning("Upload de imagem via URL remota é normalmente tratado diretamente no payload do Dify, não via upload de arquivo.")
-            raise ValueError("O upload_images DifyHelper destina-se apenas a imagens base64 ou arquivos locais; URLs remotas são passadas diretamente.")
+            self.logger.warning("Upload of image via remote URL is normally handled directly in the Dify payload, not via file upload.")
+            raise ValueError("The upload_images DifyHelper is intended for base64 images or local files; remote URLs are passed directly.")
 
     def is_doc_file(self, file_path: str) -> bool:
         """Checks if the file is a supported document type."""
