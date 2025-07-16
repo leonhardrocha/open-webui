@@ -1360,12 +1360,9 @@ class DifyHelper:
                                 #     "iteration_id": None,
                                 #     "loop_id": None
                                 # }
-                                event_content = event_data.get("content", "")
-                                if not event_content:
-                                    continue
 
                                 processed_event = self.handle_event(
-                                    event_content, event_type, event_emitter, chat_id, message_id
+                                    event_data, event_type, event_emitter, chat_id, message_id
                                 )
                                 if processed_event:
                                     self.logger.debug(
@@ -1422,20 +1419,20 @@ class DifyHelper:
 
 
         event_type_map = {
-            "message": handle_message,
-            "agent_message": handle_agent_message,
-            "text": handle_text,
-            "file": handle_file,
-            "message_end": handle_message_end,
-            "workflow_start": handle_workflow_start,
-            "node_start": handle_node_start,
-            "node_finish": handle_node_finish,
-            "workflow_finish": handle_workflow_finish,
-            "loop_start": handle_loop_start,
-            "loop_finish": handle_loop_finish,
-            "node_retry": handle_node_retry,
-            "text_replace": handle_text_replace,
-            "error": handle_error,
+            "message": self.handle_message,
+            "agent_message": self.handle_agent_message,
+            "text": self.handle_text,
+            "file": self.handle_file,
+            "message_end": self.handle_message_end,
+            "workflow_started": self.handle_workflow_start,
+            "node_started": self.handle_node_start,
+            "node_finished": self.handle_node_finish,
+            "workflow_finished": self.handle_workflow_finish,
+            "loop_started": self.handle_loop_start,
+            "loop_finished": self.handle_loop_finish,
+            "node_retry": self.handle_node_retry,
+            "text_replace": self.handle_text_replace,
+            "error": self.handle_error,
         }
 
         handler = event_type_map.get(event_type)
