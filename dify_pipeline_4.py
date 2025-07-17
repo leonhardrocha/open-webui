@@ -45,6 +45,163 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DIFY_PIPELINE")
 
+# Add these imports at the top of the file with other imports
+from enum import Enum
+from pydantic import BaseModel, Field, validator
+from typing import Dict, Any, Optional, List, Union
+
+# Add these classes before the Tools class
+class EventType(str, Enum):
+    """Enumeration of all possible Dify event types"""
+    MESSAGE = "message"
+    AGENT_MESSAGE = "agent_message"
+    TEXT_CHUNK = "text_chunk"
+    FILE = "file"
+    MESSAGE_END = "message_end"
+    WORKFLOW_STARTED = "workflow_started"
+    NODE_STARTED = "node_started"
+    NODE_FINISHED = "node_finished"
+    WORKFLOW_FINISHED = "workflow_finished"
+    ITERATION_STARTED = "iteration_started"
+    ITERATION_NEXT = "iteration_next"
+    ITERATION_COMPLETED = "iteration_completed"
+    PARALLEL_BRANCH_STARTED = "parallel_branch_started"
+    PARALLEL_BRANCH_FINISHED = "parallel_branch_finished"
+    AGENT_THOUGHT = "agent_thought"
+    AGENT_LOG = "agent_log"
+    LOOP_STARTED = "loop_started"
+    LOOP_NEXT = "loop_next"
+    LOOP_COMPLETED = "loop_completed"
+    NODE_RETRY = "node_retry"
+    TEXT_REPLACE = "text_replace"
+    ERROR = "error"
+    TTS_MESSAGE = "tts_message"
+    TTS_MESSAGE_END = "tts_message_end"
+    MESSAGE_REPLACE = "message_replace"
+
+class EventBase(BaseModel):
+    """Base model for all Dify events"""
+    event: EventType
+    data: Dict[str, Any] = Field(default_factory=dict)
+    conversation_id: Optional[str] = None
+    message_id: Optional[str] = None
+
+    @validator('data', pre=True)
+    def set_data(cls, v):
+        return v or {}
+
+class MessageEvent(EventBase):
+    """Represents a message or agent message event"""
+    answer: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class TextChunkEvent(EventBase):
+    """Represents a text chunk event"""
+    text: str = ""
+
+class FileEvent(EventBase):
+    """Represents a file event"""
+    file_id: str
+    file_name: str
+    file_type: str
+    file_size: int
+
+class MessageEndEvent(EventBase):
+    """Represents the end of a message event"""
+    usage: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    retriever_resources: List[Dict[str, Any]] = Field(default_factory=list)
+
+class WorkflowEvent(EventBase):
+    """Base class for workflow-related events"""
+    workflow_name: str = "Unknown"
+
+class NodeEvent(EventBase):
+    """Base class for node-related events"""
+    title: str = "Unknown"
+    node_type: str = "unknown"
+
+class NodeFinishedEvent(NodeEvent):
+    """Represents a node finished event"""
+    status: str
+    error: Optional[str] = None
+    outputs: Optional[Dict[str, Any]] = None
+
+class IterationEvent(NodeEvent):
+    """Base class for iteration events"""
+    index: Optional[int] = None
+
+class ParallelBranchEvent(EventBase):
+    """Base class for parallel branch events"""
+    parallel_branch_id: str = "unknown"
+
+class ParallelBranchFinishedEvent(ParallelBranchEvent):
+    """Represents a parallel branch finished event"""
+    status: str
+    error: Optional[str] = None
+
+class AgentEvent(EventBase):
+    """Base class for agent events"""
+    thought: Optional[str] = None
+    log: Optional[str] = None
+
+class ErrorEvent(EventBase):
+    """Represents an error event"""
+    message: str
+    code: Optional[str] = None
+
+class EventFactory:
+    """Factory class to create appropriate event models from raw data"""
+    
+    @staticmethod
+    def create_event(event_data: Dict[str, Any]) -> EventBase:
+        """Create the appropriate event model based on the event type"""
+        event_type = event_data.get("event")
+        data = event_data.get("data", event_data)  # Some events have data nested under 'data'
+        
+        if not event_type and "answer" in event_data:
+            event_type = EventType.MESSAGE
+            data = event_data
+            
+        if not event_type:
+            return EventBase(event=EventType.ERROR, data=event_data)
+            
+        try:
+            event_type_enum = EventType(event_type)
+        except ValueError:
+            return EventBase(event=EventType.ERROR, data=event_data)
+        
+        event_map = {
+            EventType.MESSAGE: MessageEvent,
+            EventType.AGENT_MESSAGE: MessageEvent,
+            EventType.TEXT_CHUNK: TextChunkEvent,
+            EventType.FILE: FileEvent,
+            EventType.MESSAGE_END: MessageEndEvent,
+            EventType.WORKFLOW_STARTED: WorkflowEvent,
+            EventType.NODE_STARTED: NodeEvent,
+            EventType.NODE_FINISHED: NodeFinishedEvent,
+            EventType.WORKFLOW_FINISHED: WorkflowEvent,
+            EventType.ITERATION_STARTED: IterationEvent,
+            EventType.ITERATION_NEXT: IterationEvent,
+            EventType.ITERATION_COMPLETED: NodeFinishedEvent,
+            EventType.PARALLEL_BRANCH_STARTED: ParallelBranchEvent,
+            EventType.PARALLEL_BRANCH_FINISHED: ParallelBranchFinishedEvent,
+            EventType.AGENT_THOUGHT: AgentEvent,
+            EventType.AGENT_LOG: AgentEvent,
+            EventType.LOOP_STARTED: NodeEvent,
+            EventType.LOOP_NEXT: IterationEvent,
+            EventType.LOOP_COMPLETED: NodeFinishedEvent,
+            EventType.NODE_RETRY: NodeEvent,
+            EventType.TEXT_REPLACE: EventBase,
+            EventType.ERROR: ErrorEvent,
+            EventType.TTS_MESSAGE: EventBase,
+            EventType.TTS_MESSAGE_END: EventBase,
+            EventType.MESSAGE_REPLACE: EventBase,
+        }
+        
+        event_class = event_map.get(event_type_enum, EventBase)
+        return event_class(event=event_type_enum, **data)
+
 
 class EventEmitter:
     """
@@ -475,15 +632,14 @@ class Tools:
         __user__: Optional[dict] = None,
         __task__: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
-        """
-        Handles chat requests from OpenWebUI, orchestrates Dify interaction,
+        """Handles chat requests from OpenWebUI, orchestrates Dify interaction,
         and streams responses back to OpenWebUI.
         """
         event_emitter = EventEmitter(__event_emitter__, debug=self.debug)
-        await event_emitter.progress_update("Iniciando o DIFY Manifold Pipe...")
+        await event_emitter.progress_update("Starting DIFY Manifold Pipe...")
 
         if not self.valves.DIFY_KEY:
-            error_msg = "Erro: A variável de ambiente DIFY_KEY não está configurada. Por favor, defina sua chave de API Dify."
+            error_msg = "Error: DIFY_KEY environment variable is not set. Please set your Dify API key."
             self.logger.error(error_msg)
             await event_emitter.error_update(error_msg)
             yield {"type": "error", "content": error_msg}
@@ -493,19 +649,19 @@ class Tools:
         model_name = (
             body["model"].split(".")[-1] if "." in body["model"] else body["model"]
         )
-        self.logger.debug(f"Nome do modelo resolvido: {model_name}")
+        self.logger.debug(f"Resolved model name: {model_name}")
 
         # Handle special OpenWebUI tasks (title generation, tag generation)
         if __task__ is not None:
             if __task__ == "title_generation":
                 await event_emitter.success_update(
-                    "Geração de título pelo Dify (placeholder)."
+                    "Title generation by Dify (placeholder)."
                 )
-                yield {"type": "text", "content": f"Título Dify: {model_name}"}
+                yield {"type": "text", "content": f"Dify Title: {model_name}"}
                 return
             elif __task__ == "tags_generation":
                 await event_emitter.success_update(
-                    "Geração de tags pelo Dify (placeholder)."
+                    "Tag generation by Dify (placeholder)."
                 )
                 yield {"type": "text", "content": f'{{"tags":["{model_name}"]}}'}
                 return
@@ -516,14 +672,13 @@ class Tools:
             current_user = __user__["email"]
         elif __user__ and "id" in __user__:  # Fallback to id if email not present
             current_user = __user__["id"]
-        self.logger.debug(f"Usuário atual para Dify: {current_user}")
+        self.logger.debug(f"Current user for Dify: {current_user}")
 
         # Extract chat_id and message_id from the OpenWebUI event context
         chat_id = None
         message_id = None
 
         # OpenWebUI `__event_emitter__` is typically a partial function that has chat_id/message_id in its closure
-        
         closure_info = event_emitter.get_closure_info()
         if closure_info:
             chat_id = closure_info.get("chat_id")
@@ -536,7 +691,7 @@ class Tools:
             message_id = body.get("message_id")
 
         if not chat_id or not message_id:
-            error_msg = "Erro: Não foi possível obter o ID da conversa ou o ID da mensagem do OpenWebUI. Garanta que o contexto da conversa esteja disponível."
+            error_msg = "Error: Could not get chat ID or message ID from OpenWebUI. Make sure the chat context is available."
             self.logger.error(error_msg)
             await event_emitter.error_update(error_msg)
             yield {"type": "error", "content": error_msg}
@@ -546,8 +701,8 @@ class Tools:
 
         # Process system messages and regular messages
         system_message, messages = pop_system_message(body["messages"])
-        self.logger.debug(f"Mensagem do sistema: {system_message}")
-        self.logger.debug(f"Mensagens processadas: {len(messages)}")
+        self.logger.debug(f"System message: {system_message}")
+        self.logger.debug(f"Processed messages: {len(messages)}")
 
         # Dify conversation context management
         dify_conversation_id = None
@@ -562,16 +717,14 @@ class Tools:
                 "dify_conversation_id": "",  # Will be filled by Dify's first response
                 "message_id_map": {},  # Map OWUI message_id to Dify message_id
             }
-            self.dify.dify_file_list[chat_id] = (
-                {}
-            )  # Clear file list for new conversation
+            self.dify.dify_file_list[chat_id] = {}  # Clear file list for new conversation
             self.logger.info(
-                f"Nova conversa iniciada para chat_id: {chat_id}. Estado limpo."
+                f"New conversation started for chat_id: {chat_id}. State cleared."
             )
         else:
             # Validate model consistency for existing conversations
-            if self.dify.dify_chat_model.get(chat_id)!= model_name:
-                error_msg = f"Erro: Não é possível mudar o modelo em uma conversa existente. Esta conversa foi iniciada com '{self.dify.dify_chat_model.get(chat_id, 'modelo desconhecido')}'."
+            if self.dify.dify_chat_model.get(chat_id) != model_name:
+                error_msg = f"Error: Cannot change model in an existing conversation. This conversation was started with '{self.dify.dify_chat_model.get(chat_id, 'unknown model')}'."
                 self.logger.error(error_msg)
                 await event_emitter.error_update(error_msg)
                 yield {"type": "error", "content": error_msg}
@@ -585,213 +738,115 @@ class Tools:
             )
 
             # Find the Dify message ID of the *previous AI response* to set as parent for continuity
-            # The OpenWebUI `messages` list should contain the full history up to the current user query.
-            # We look for the last assistant message in this list.
-            last_assistant_message_owui_id = None
-            for msg_idx in range(
-                len(messages) - 2, -1, -1
-            ):  # Iterate backwards from message before current user query
-                if messages[msg_idx]["role"] == "assistant":
-                    last_assistant_message_owui_id = messages[msg_idx]["id"]
+            # The OpenWebUI `messages` list is in chronological order, so we need to find the last AI message
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant" and msg.get("id") in message_id_map:
+                    dify_parent_message_id = message_id_map[msg["id"]]
+                    self.logger.debug(
+                        f"Found parent Dify message ID for continuity: {dify_parent_message_id}"
+                    )
                     break
 
-            if (
-                last_assistant_message_owui_id
-                and last_assistant_message_owui_id in message_id_map
-            ):
-                dify_parent_message_id = message_id_map[last_assistant_message_owui_id]
-                self.logger.debug(
-                    f"Continuando conversa Dify com parent_message_id: {dify_parent_message_id}"
-                )
-            else:
-                self.logger.debug(
-                    "Nenhuma mensagem anterior do assistente mapeada para Dify. Iniciando novo branch ou primeira mensagem da conversa Dify."
-                )
-
-        # Get the last message (current user query)
-        user_query_message = messages[-1]
+        # Prepare the query text from the last user message
         query_text = ""
-        dify_files_payload = []  # List to hold Dify's file payload structure
-
-        # Process message content (text and image_url)
-        if isinstance(user_query_message.get("content"), list):
-            for item in user_query_message["content"]:
-                if item["type"] == "text":
-                    query_text += item["text"]
-                elif item["type"] == "image_url":
-                    try:
-                        # Upload base64 encoded image or remote URL image
-                        # Dify expects 'upload_file_id' for local_file and 'url' for remote_url
-                        if item["image_url"]["url"].startswith("data:"):
-                            upload_file_id = self.dify.upload_images(
-                                item["image_url"]["url"], current_user
-                            )
-                            dify_files_payload.append(
-                                {
-                                    "type": "image",
-                                    "transfer_method": "local_file",
-                                    "upload_file_id": upload_file_id,
-                                }
-                            )
-                            self.logger.info(
-                                f"Imagem base64 carregada para Dify com ID: {upload_file_id}"
-                            )
-                        else:
-                            # Assuming remote URL images can be sent directly if Dify supports it
-                            dify_files_payload.append(
-                                {
-                                    "type": "image",
-                                    "transfer_method": "remote_url",
-                                    "url": item["image_url"]["url"],
-                                }
-                            )
-                            self.logger.info(
-                                f"Imagem remota adicionada ao payload: {item['image_url']['url']}"
-                            )
-
-                    except Exception as e:
-                        error_msg = f"Erro ao processar imagem para Dify: {e}"
-                        self.logger.error(error_msg)
-                        await event_emitter.error_update(error_msg)
-                        yield {"type": "error", "content": error_msg}
-                        return
-        else:
-            query_text = user_query_message.get("content", "")
-
-        # Process file uploads from `body["upload_files"]`
-        if "upload_files" in body and body["upload_files"]:
-            if chat_id not in self.dify.dify_file_list:
-                self.dify.dify_file_list[chat_id] = {}
-
-            for file_obj in body["upload_files"]:
-                if file_obj.get("type")!= "file" or not file_obj.get("id"):
-                    continue
-
-                owui_file_id = file_obj["id"]
-
-                # Check if file was already uploaded in this conversation
-                if owui_file_id in self.dify.dify_file_list[chat_id]:
-                    dify_files_payload.append(
-                        self.dify.dify_file_list[chat_id][owui_file_id]["dify_payload"]
+        if messages and messages[-1].get("role") == "user":
+            query_text = messages[-1].get("content", "")
+            if not isinstance(query_text, str):
+                # Handle case where content might be a list of content parts
+                if isinstance(query_text, list):
+                    query_text = " ".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in query_text
                     )
-                    self.logger.debug(
-                        f"Reutilizando arquivo Dify já carregado: {owui_file_id}"
-                    )
-                    continue
+                else:
+                    query_text = str(query_text)
 
-                file_path = None
-                if (
-                    "collection_name" in file_obj
-                    and file_obj["file"]
-                    and "filename" in file_obj["file"]
-                ):
-                    file_path = os.path.join(UPLOAD_DIR, file_obj["file"]["filename"])
-                elif file_obj["file"] and "path" in file_obj["file"]:
-                    file_path = file_obj["file"]["path"]
+        if not query_text:
+            error_msg = "No valid query text found in the last user message."
+            self.logger.error(error_msg)
+            await event_emitter.error_update(error_msg)
+            yield {"type": "error", "content": error_msg}
+            return
 
-                if not file_path or not os.path.exists(file_path):
-                    error_msg = f"Caminho do arquivo não encontrado ou inválido para o ID do arquivo OpenWebUI: {owui_file_id}. Caminho: {file_path}"
-                    self.logger.error(error_msg)
-                    await event_emitter.error_update(
-                        f"Erro: Arquivo carregado não encontrado no servidor: {file_obj.get('file',{}).get('filename', 'Arquivo desconhecido')}"
-                    )
-                    continue  # Skip this file and continue with others
-
-                file_mime_type = file_obj["file"]["meta"]["content_type"]
-                file_name = file_obj["file"]["filename"]
-
-                upload_file_id = None
-                file_type_for_dify = ""
-
-                try:
-                    if self.dify.is_doc_file(file_path):
-                        upload_file_id = self.dify.upload_file(
-                            current_user, file_path, file_mime_type
-                        )
-                        file_type_for_dify = "document"
-                    elif self.dify.is_text_file(file_mime_type):
-                        upload_file_id = self.dify.upload_text_file(
-                            current_user, file_path
-                        )
-                        file_type_for_dify = "document"
-                    elif self.dify.is_audio_file(file_path):
-                        upload_file_id = self.dify.upload_file(
-                            current_user, file_path, file_mime_type
-                        )
-                        file_type_for_dify = "audio"
-                    elif self.dify.is_image_file(file_path):
-                        upload_file_id = self.dify.upload_file(
-                            current_user, file_path, file_mime_type
-                        )
-                        file_type_for_dify = "image"
-                    else:
-                        self.logger.warning(
-                            f"Tipo de arquivo não suportado para upload no Dify: {file_mime_type} ({file_name}). Pulando."
-                        )
-                        await event_emitter.progress_update(
-                            f"Pulando arquivo não suportado: {file_name}"
-                        )
+        # Handle file uploads if present in the message
+        dify_files_payload = []
+        if messages and "files" in messages[-1]:
+            try:
+                for file_info in messages[-1]["files"]:
+                    if not isinstance(file_info, dict):
                         continue
 
-                    if upload_file_id:
-                        dify_file_payload_entry = {
-                            "type": file_type_for_dify,
+                    file_id = file_info.get("id")
+                    if not file_id:
+                        continue
+
+                    # Check if we already processed this file for this chat
+                    if file_id in self.dify.dify_file_list.get(chat_id, {}):
+                        file_data = self.dify.dify_file_list[chat_id][file_id]
+                        dify_files_payload.append(file_data["dify_payload"])
+                        continue
+
+                    # Process new file upload
+                    file_path = os.path.join(UPLOAD_DIR, file_id)
+                    if not os.path.exists(file_path):
+                        self.logger.warning(f"File not found: {file_path}")
+                        continue
+
+                    # Get MIME type
+                    mime_type = file_info.get("type", "application/octet-stream")
+                    
+                    # Upload file to Dify
+                    try:
+                        if mime_type.startswith("image/"):
+                            file_id = await self.dify.upload_images(file_path, current_user)
+                        elif mime_type.startswith("audio/"):
+                            file_id = await self.dify.upload_audio(file_path, current_user)
+                        else:
+                            file_id = await self.dify.upload_file(
+                                user_id=current_user,
+                                file_path=file_path,
+                                mime_type=mime_type,
+                            )
+
+                        # Store file info for future reference
+                        if chat_id not in self.dify.dify_file_list:
+                            self.dify.dify_file_list[chat_id] = {}
+
+                        file_payload = {
+                            "type": "file",
                             "transfer_method": "local_file",
-                            "upload_file_id": upload_file_id,
+                            "upload_file_id": file_id,
                         }
-                        dify_files_payload.append(dify_file_payload_entry)
 
-                        # Store the mapping for future requests in this chat
-                        self.dify.dify_file_list[chat_id][owui_file_id] = {
+                        self.dify.dify_file_list[chat_id][file_id] = {
                             "local_file_path": file_path,
-                            "dify_file_id": upload_file_id,
-                            "file_name": file_name,
-                            "dify_payload": dify_file_payload_entry,  # Store the full payload for re-use
+                            "dify_file_id": file_id,
+                            "file_name": os.path.basename(file_path),
+                            "dify_payload": file_payload,
                         }
-                        self.logger.info(
-                            f"Arquivo carregado e mapeado: {file_name} (OWUI ID: {owui_file_id}) para Dify ID: {upload_file_id}"
-                        )
 
-                except Exception as e:
-                    self.logger.error(
-                        f"Falha ao carregar o arquivo {file_name} para o Dify: {e}",
-                        exc_info=True,
-                    )
-                    await event_emitter.error_update(
-                        f"Falha ao carregar o arquivo '{file_name}': {e}"
-                    )
-                    continue
+                        dify_files_payload.append(file_payload)
 
-        await event_emitter.progress_update("Enviando mensagem para Dify...")
+                    except Exception as e:
+                        self.logger.error(f"Error uploading file {file_path} to Dify: {e}")
+                        continue
 
+            except Exception as e:
+                self.logger.error(f"Error processing files: {e}")
+
+        # If this is a new conversation, we need to create one in Dify
+        final_dify_conversation_id = dify_conversation_id
         last_dify_message_id_received = None
-        final_dify_conversation_id = dify_conversation_id  # Start with existing if any
 
         try:
-            # Validate API key before proceeding
-            if (
-                not hasattr(self.valves, "DIFY_KEY")
-                or not self.valves.DIFY_KEY
-                or not isinstance(self.valves.DIFY_KEY, str)
-                or not self.valves.DIFY_KEY.strip()
-            ):
-                error_msg = "DIFY_KEY is not properly configured. Please check your environment variables."
-                self.logger.error(error_msg)
-                raise ValueError(error_msg)
-
             async for chunk in self.dify.send_chat_message(
                 query=query_text,
                 user=current_user,
                 conversation_id=final_dify_conversation_id,
                 response_mode="streaming",
-                inputs={},  # Pass empty inputs if not explicitly used, Dify API payload
+                inputs={},
                 files=dify_files_payload,
                 event_emitter=event_emitter,
-                # Dify's `chat-messages` API uses `conversation_id` and `message_id` for continuation.
-                # `message_id` inside events will be used to track the last Dify message for mapping.
-                # `parent_message_id` would be passed in payload only if we were creating a new message
-                # explicitly linking to a parent, but Dify API manages this with `conversation_id`
-                # and internal state when streaming.
             ):
                 # Update conversation and message IDs as soon as they are available from Dify
                 if chunk.get("conversation_id") and not final_dify_conversation_id:
@@ -806,217 +861,78 @@ class Tools:
                 if chunk.get("message_id"):
                     last_dify_message_id_received = chunk["message_id"]
 
-                # Process and yield events to OpenWebUI
-                event_type = chunk.get("event") # Primary event type from Dify
-                event_data = chunk.get("data", chunk) # Most workflow events have data nested under 'data' [1]
-                node_type = event_data.get("node_type") # Node type is nested within data for node-specific events [1]
+                # Process the event using Pydantic models
+                try:
+                    event = EventFactory.create_event(chunk)
+                    
+                    # Handle common event processing
+                    if event.event in [EventType.MESSAGE, EventType.AGENT_MESSAGE]:
+                        yield {
+                            "type": "text",
+                            "content": getattr(event, "answer", ""),
+                        }
+                    elif event.event == EventType.TEXT_CHUNK:
+                        yield {
+                            "type": "text",
+                            "content": getattr(event, "text", ""),
+                        }
+                    elif event.event == EventType.FILE:
+                        yield chunk  # Already in correct format
+                    elif event.event == EventType.MESSAGE_END:
+                        # Update message mapping
+                        if chat_id and message_id and last_dify_message_id_received:
+                            if "message_id_map" not in self.dify.chat_message_mapping[chat_id]:
+                                self.dify.chat_message_mapping[chat_id]["message_id_map"] = {}
+                            self.dify.chat_message_mapping[chat_id]["message_id_map"][
+                                message_id
+                            ] = last_dify_message_id_received
+                            self.logger.debug(
+                                f"Updated Dify conversation mapping for chat_id {chat_id}: OWUI msg ID {message_id} -> Dify msg ID {last_dify_message_id_received}"
+                            )
+                        
+                        self.dify.save_state()
+                        
+                        yield {
+                            "type": "message_end",
+                            "content": {
+                                "usage": getattr(event, "usage", {}),
+                                "metadata": getattr(event, "metadata", {}),
+                                "retriever_resources": getattr(event, "retriever_resources", []),
+                            },
+                        }
+                    elif event.event == EventType.ERROR:
+                        error_msg = getattr(event, "message", "Unknown error from Dify")
+                        self.logger.error(f"Dify returned error: {error_msg}")
+                        await event_emitter.error_update(f"Dify Error: {error_msg}")
+                        yield {"type": "error", "content": error_msg}
+                        return
+                    else:
+                        # For other event types, yield them with a standardized format
+                        yield {
+                            "type": str(event.event.value).lower(),
+                            "content": event.dict(exclude={"event"})
+                        }
 
-                if event_type in ["message", "agent_message"]: # Handle both message and agent_message as text output
-                    self.logger.debug(f"Processando evento de mensagem: {event_type}")
+                except Exception as e:
+                    self.logger.error(f"Error processing event: {e}", exc_info=True)
                     yield {
-                        "type": "text",  # OpenWebUI expects 'text' for streaming content
-                        "content": chunk.get("answer", ""), # Content for message is in 'answer'
+                        "type": "error",
+                        "content": f"Error processing event: {str(e)}",
+                        "original_event": chunk
                     }
-                elif event_type == "text_chunk":  # Represents a partial text fragment [1]
-                    self.logger.debug(f"Processando evento de chunk de texto: {event_type}")
-                    yield {
-                        "type": "text",  # OpenWebUI expects 'text' for streaming content
-                        "content": event_data.get("text", ""), # Content for text_chunk is in data.text [1]
-                    }
-                elif event_type == "file": # This is the normalized file event (original code)
-                    self.logger.debug(f"Recebido evento de arquivo do Dify: {chunk}")
-                    yield chunk  # Yield the already normalized file event
-                elif event_type == "message_end": # Signals the end of a message generation
-                    self.logger.debug(f"Processando evento de fim de mensagem: {event_type}")
-                    if chat_id and message_id and last_dify_message_id_received:
-                        if (
-                            "message_id_map"
-                            not in self.dify.chat_message_mapping[chat_id]
-                        ):
-                            self.dify.chat_message_mapping[chat_id][
-                                "message_id_map"
-                            ] = {}
-                        self.dify.chat_message_mapping[chat_id]["message_id_map"][
-                            message_id
-                        ] = last_dify_message_id_received
-                        self.logger.debug(
-                            f"Mapeamento de conversa Dify atualizado para chat_id {chat_id}: OWUI msg ID {message_id} -> Dify msg ID {last_dify_message_id_received}"
-                        )
-                    self.dify.save_state()  # Save state after successful message completion
-
-                    yield {
-                        "type": "message_end",  # Custom event type if OWUI handles it specifically
-                        "content": {
-                            "usage": chunk.get("usage", {}),
-                            "metadata": chunk.get("metadata", {}),
-                            "retriever_resources": chunk.get("retriever_resources",),
-                        },
-                    }
-                elif event_type == "workflow_started": # Workflow starts execution [1]
-                    wf_name = event_data.get("workflow_name", "Desconhecido")
-                    self.logger.debug(f"Processando evento de início de workflow: {event_type}")
-                    await event_emitter.progress_update(
-                        f"Fluxo de Trabalho Dify Iniciado: {wf_name}"
-                    )
-                    yield {"type": "workflow_start", "content": event_data}
-
-                elif event_type == "node_started": # Node execution started [1]
-                    node_name = event_data.get("title", "Desconhecido")
-                    self.logger.debug(f"Processando evento de início de nó: {event_type} (Tipo: {node_type})")
-                    await event_emitter.progress_update(
-                        f"Nó Dify Iniciado: {node_name} (Tipo: {node_type})"
-                    )
-                    yield {"type": "node_start", "content": event_data}
-
-                elif event_type == "node_finished": # Node execution ends, success or failure [1]
-                    node_name = event_data.get("title", "Desconhecido")
-                    status = event_data.get("status") # Status of execution [1]
-                    error_msg = event_data.get("error") # Optional reason of error [1]
-                    self.logger.debug(f"Processando evento de fim de nó: {event_type} (Tipo: {node_type}, Status: {status})" + (f" Erro: {error_msg}" if error_msg else ""))
-                    await event_emitter.progress_update(
-                        f"Nó Dify Finalizado: {node_name} (Status: {status})" + (f" Erro: {error_msg}" if error_msg else "")
-                    )
-                    yield {"type": "node_finish", "content": event_data} # Yield full data including outputs
-
-                elif event_type == "workflow_finished": # Workflow execution ends, success or failure [1]
-                    status = event_data.get("status") # Status of execution [1]
-                    error_msg = event_data.get("error") # Optional reason of error [1]
-                    self.logger.debug(f"Processando evento de fim de workflow: {event_type}")
-                    await event_emitter.success_update(
-                        f"Fluxo de Trabalho Dify Finalizado. Status: {status}" + (f" Erro: {error_msg}" if error_msg else "")
-                    )
-                    self.dify.save_state()  # Ensure state is saved at workflow end too
-                    yield {"type": "workflow_finish", "content": event_data}
-
-                elif event_type == "iteration_started": # Iteration node started
-                    node_name = event_data.get("title", "Iteration")
-                    self.logger.debug(f"Processando evento de início de iteração: {event_type} (Tipo: {node_type})")
-                    await event_emitter.progress_update(f"Iteração Iniciada: {node_name}")
-                    yield {"type": "iteration_start", "content": event_data}
-
-                elif event_type == "iteration_next": # Next iteration in an iteration node
-                    node_name = event_data.get("title", "Iteration")
-                    index = event_data.get("index")
-                    self.logger.debug(f"Processando evento de próxima iteração: {event_type} (Tipo: {node_type}, Índice: {index})")
-                    await event_emitter.progress_update(f"Próxima Iteração: {node_name} (Índice: {index})")
-                    yield {"type": "iteration_next", "content": event_data}
-
-                elif event_type == "iteration_completed": # Iteration node completed
-                    node_name = event_data.get("title", "Iteration")
-                    status = event_data.get("status")
-                    error_msg = event_data.get("error")
-                    self.logger.debug(f"Processando evento de iteração concluída: {event_type} (Tipo: {node_type}, Status: {status})" + (f" Erro: {error_msg}" if error_msg else ""))
-                    await event_emitter.progress_update(
-                        f"Iteração Concluída: {node_name} (Status: {status})" + (f" Erro: {error_msg}" if error_msg else "")
-                    )
-                    yield {"type": "iteration_finish", "content": event_data}
-
-                elif event_type == "parallel_branch_started": # Parallel branch started
-                    branch_id = event_data.get("parallel_branch_id", "Desconhecido")
-                    self.logger.debug(f"Processando evento de início de ramificação paralela: {event_type}")
-                    await event_emitter.progress_update(f"Ramificação Paralela Iniciada: {branch_id}")
-                    yield {"type": "parallel_branch_start", "content": event_data}
-
-                elif event_type == "parallel_branch_finished": # Parallel branch finished
-                    branch_id = event_data.get("parallel_branch_id", "Desconhecido")
-                    status = event_data.get("status")
-                    error_msg = event_data.get("error")
-                    self.logger.debug(f"Processando evento de fim de ramificação paralela: {event_type} (Status: {status})" + (f" Erro: {error_msg}" if error_msg else ""))
-                    await event_emitter.progress_update(
-                        f"Ramificação Paralela Finalizada: {branch_id} (Status: {status})" + (f" Erro: {error_msg}" if error_msg else "")
-                    )
-                    yield {"type": "parallel_branch_finish", "content": event_data}
-
-                elif event_type == "agent_thought": # Agent thought process
-                    self.logger.debug(f"Processando evento de pensamento do agente: {event_type}. Dados: {event_data}")
-                    await event_emitter.progress_update("Pensamento do Agente...")
-                    yield {"type": "agent_thought", "content": event_data}
-
-                elif event_type == "agent_log": # Agent log messages
-                    self.logger.debug(f"Processando evento de log do agente: {event_type}. Dados: {event_data}")
-                    await event_emitter.progress_update("Log do Agente...")
-                    yield {"type": "agent_log", "content": event_data}
-
-                elif event_type == "loop_started": # Loop node started
-                    node_name = event_data.get("title", "Loop")
-                    self.logger.debug(f"Processando evento de início de loop: {event_type} (Tipo: {node_type})")
-                    await event_emitter.progress_update(f"Loop Iniciado: {node_name}")
-                    yield {"type": "loop_start", "content": event_data}
-
-                elif event_type == "loop_next": # Next iteration in a loop node
-                    node_name = event_data.get("title", "Loop")
-                    index = event_data.get("index")
-                    self.logger.debug(f"Processando evento de próximo loop: {event_type} (Tipo: {node_type}, Índice: {index})")
-                    await event_emitter.progress_update(f"Próximo Loop: {node_name} (Índice: {index})")
-                    yield {"type": "loop_next", "content": event_data}
-
-                elif event_type == "loop_completed": # Loop node completed
-                    node_name = event_data.get("title", "Loop")
-                    status = event_data.get("status")
-                    error_msg = event_data.get("error")
-                    self.logger.debug(f"Processando evento de loop concluído: {event_type} (Tipo: {node_type}, Status: {status})" + (f" Erro: {error_msg}" if error_msg else ""))
-                    await event_emitter.progress_update(
-                        f"Loop Concluído: {node_name} (Status: {status})" + (f" Erro: {error_msg}" if error_msg else "")
-                    )
-                    yield {"type": "loop_finish", "content": event_data}
-
-                elif event_type == "node_retry": # Node retry event
-                    node_name = event_data.get("title", "Node")
-                    self.logger.debug(f"Processando evento de tentativa de nó: {event_type} (Tipo: {node_type})")
-                    await event_emitter.progress_update(f"Tentando Novamente Nó: {node_name}")
-                    yield {"type": "node_retry", "content": event_data}
-
-                elif event_type == "text_replace": # Text replacement event
-                    self.logger.debug(f"Processando evento de substituição de texto: {event_type}. Dados: {event_data}")
-                    await event_emitter.progress_update("Substituição de Texto...")
-                    yield {"type": "text_replace", "content": event_data}
-
-                elif event_type == "error": # Indicates an exception or error [2]
-                    error_msg = chunk.get("message", "Erro desconhecido do Dify")
-                    self.logger.error(f"Dify retornou erro: {error_msg}")
-                    await event_emitter.error_update(f"Erro Dify: {error_msg}")
-                    yield {
-                        "type": "error",  # OpenWebUI standard error type
-                        "content": error_msg,
-                    }
-                    return  # Terminate the generator on error
-                # For other event types like tts_message, tts_message_end, message_replace,
-                # handle_event already returns them in a suitable format, so we can yield them directly.
-                elif event_type in [
-                    "tts_message",
-                    "tts_message_end",
-                    "message_replace",
-                ]:
-                    self.logger.debug(f"Processando evento TTS/Replace: {event_type}. Dados: {chunk}")
-                    yield chunk
-                elif event_type is None: # Handle cases where 'event' key might be missing, as seen in your logs
-                    self.logger.warning(f"Tipo de evento Dify desconhecido recebido: None. Dados: {chunk}")
-                    # For the specific case in your log where node_finished data was passed as 'None' event type
-                    # and contained 'node_type': 'llm', we can add a specific check here if needed,
-                    # but generally, it indicates a malformed event.
-                    # The previous node_finished handler should ideally catch this if 'event' key is present.
-                    # If 'event' is truly None, it's an unexpected format.
-                    yield {"type": "dify_unhandled_None", "content": chunk}
-                else: # Catch any other unexpected event types not explicitly handled
-                    self.logger.warning(f"Tipo de evento Dify desconhecido recebido: {event_type}. Dados: {chunk}")
-                    # Yielding the raw chunk might be useful for debugging or future compatibility
-                    yield {"type": f"dify_unhandled_{event_type}", "content": chunk}
-
 
         except aiohttp.ClientError as e:
-            error_result = f"Erro de comunicação HTTP com Dify: {str(e)}"
+            error_result = f"HTTP communication error with Dify: {str(e)}"
             self.logger.exception(error_result)
             await event_emitter.error_update(error_result)
             yield {"type": "error", "content": error_result}
         except asyncio.TimeoutError:
-            error_result = "A requisição para Dify excedeu o tempo limite (5 minutos)."
+            error_result = "Request to Dify timed out (5 minutes)."
             self.logger.error(error_result)
             await event_emitter.error_update(error_result)
             yield {"type": "error", "content": error_result}
         except Exception as e:
-            error_result = (
-                f"Um erro inesperado ocorreu durante a interação com o Dify: {str(e)}"
-            )
+            error_result = f"An unexpected error occurred during interaction with Dify: {str(e)}"
             self.logger.exception(error_result)
             await event_emitter.error_update(error_result)
             yield {"type": "error", "content": error_result}
@@ -1352,11 +1268,72 @@ class DifyHelper:
                     # For streaming mode, process the SSE stream
                     async for line in response.content:
                         line = line.decode("utf-8").strip()
-                        if line:
-                            # Parse the line and yield a dictionary
-                            if result := await self.parse_line_to_dict(line):
-                                yield result
+                        if not line:
+                            continue
 
+                        if line.startswith("data: "):
+                            try:
+                                payload = json.loads(
+                                    line[6:]
+                                )  # Remove 'data: ' prefix
+                                event_type = payload.get("event")
+                                event_data = payload.get("data", {})
+
+                                # Extract chat_id and message_id from event emitter closure
+                                closure_info = event_emitter.get_closure_info()
+                                if closure_info:
+                                    chat_id = closure_info.get("chat_id")
+                                    message_id = closure_info.get("message_id")
+                                else:
+                                    chat_id = ""
+                                    message_id = ""
+
+                                # Process the Dify event and yield a normalized event
+                                # {
+                                #     "process_data": None,
+                                #     "outputs": {
+                                #         "depth": None,
+                                #         "sys.query": "research about cat memes",
+                                #         "sys.files": [],
+                                #         "sys.conversation_id": "f965a860-717f-4be0-9fef-e49b57137716",
+                                #         "sys.user_id": "test@example.com",
+                                #         "sys.dialogue_count": 0,
+                                #         "sys.app_id": "f10172d5-169d-4003-926c-9dfbfa5ab985",
+                                #         "sys.workflow_id": "f2f20deb-4b6f-4edd-b08a-c20538aeb204",
+                                #         "sys.workflow_run_id": "b007f4fd-33b6-4ed2-9fc8-1c31d03ec0a4"
+                                #     },
+                                #     "status": "succeeded",
+                                #     "error": None,
+                                #     "elapsed_time": 0.07908,
+                                #     "execution_metadata": None,
+                                #     "created_at": 1752611213,
+                                #     "finished_at": 1752611213,
+                                #     "files": [],
+                                #     "parallel_id": None,
+                                #     "parallel_start_node_id": None,
+                                #     "parent_parallel_id": None,
+                                #     "parent_parallel_start_node_id": None,
+                                #     "iteration_id": None,
+                                #     "loop_id": None
+                                # }
+
+                                processed_event = self.handle_event(
+                                    event_data, event_type, event_emitter, chat_id, message_id
+                                )
+                                if processed_event:
+                                    self.logger.debug(
+                                        f"Processed Dify event: {processed_event}"
+                                    )
+                                    yield event_data
+
+                            except json.JSONDecodeError as e:
+                                self.logger.error(
+                                    f"Failed to parse Dify event data: {line}. Error: {e}"
+                                )
+                                yield {
+                                    "type": "error",
+                                    "message": f"Failed to parse event data: {line[:100]}...",
+                                }
 
         except asyncio.TimeoutError:
             self.logger.error("Dify request timed out after 5 minutes")
@@ -1377,75 +1354,6 @@ class DifyHelper:
             yield {
                 "type": "error",
                 "message": f"An unexpected error occurred: {str(e)}",
-            }
-
-    async def parse_line_to_dict(self, line: bytes) -> Optional[dict]:
-        """
-        Parse a line from the Dify API response into a structured dictionary.
-        
-        Args:
-            line: Raw bytes line from the HTTP response
-            
-        Returns:
-            dict: Parsed event data or None if the line should be skipped
-            
-        Raises:
-            json.JSONDecodeError: If the line contains invalid JSON
-        """
-        try:
-            # Decode the line from bytes to string
-            line_str = line.strip()
-                           
-            # Handle SSE format (data: {...})
-            if line_str:
-                if line_str.startswith('data:'):
-                    json_str = line_str[6:].strip()  # Remove 'data: ' prefix
-                    if not json_str or json_str == '[DONE]':
-                        return None
-                    try:
-                        data = json.loads(json_str)
-                        return data
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"Failed to parse JSON: {json_str}")
-                        return {
-                            "event": "error",
-                            "data": {
-                                "message": f"Invalid JSON: {str(e)}",
-                            "code": "json_parse_error"
-                        }
-                    }
-                if line_str.startswith('event:'):
-                    event_str = line_str[7:].strip()  # Remove 'event: ' prefix
-                    if not event_str:
-                        return None
-                    if event_str == 'ping':
-                        return { 
-                            "event": "ping",
-                            "data": {}
-                        }
-                    try:
-                        event_data = json.loads(event_str)
-                        return event_data
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"Failed to parse JSON: {event_str}")
-                        return {
-                            "event": "error",
-                            "data": {
-                                "message": f"Invalid JSON: {str(e)}",
-                            "code": "json_parse_error"
-                        }
-                    }
-            
-            return None            
-                
-        except Exception as e:
-            self.logger.error(f"Error parsing line: {str(e)}", exc_info=True)
-            return {
-                "event": "error",
-                "data": {
-                    "message": f"Error parsing response: {str(e)}",
-                    "code": "parse_error"
-                }
             }
 
     def handle_event(
