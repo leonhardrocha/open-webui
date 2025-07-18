@@ -4,8 +4,7 @@ from .event_models import (
     DifyEvent, 
     NodeStartEvent, 
     NodeFinishEvent, 
-    WorkflowFinishEvent, 
-    parse_dify_event
+    WorkflowFinishEvent
 )
 from .event_emitter import EventEmitter
 from .event_handler_registry import IEventHandler
@@ -19,27 +18,42 @@ class DifyEventHandler(IEventHandler):
             "iteration_finish": NodeFinishEvent,
             "workflow_finish": WorkflowFinishEvent,
         }
+        self.event_type_map = {}  # Initialize event_type_map
 
     def is_event_type_supported(self, event_type: str) -> bool:
         return event_type in self.event_type_map
 
     async def handle(self, event_data: Dict[str, Any]):
-
-        """Handle a Dify event"""
+        """Handle a Dify event asynchronously.
         
-        try:
-            # Parse the event using our models
-            event = parse_dify_event(event_data)            
+        Args:
+            event_data: The raw event data to process
             
-            if not self.is_event_type_supported(event.type):
-                raise ValueError(f"Unsupported event type: {event.type}")
+        Returns:
+            The parsed event object
+        """
+        try:
+            # Parse the event using our models (synchronous operation)
+            event = self.parse_dify_event(event_data)
+            
+            # Get the appropriate handler for this event type if any
             handler = self.event_type_map.get(event.type)
             if handler:
+                # If there's a handler, await it
                 await handler(event)
                 
+            return event
+                
         except Exception as e:
-            await self.event_emitter.error_update(
-                f"Error processing event: {str(e)}"
+            # Emit error status
+            await self.event_emitter.emit(
+                "status",
+                {
+                    "status": "error",
+                    "description": f"Error processing event: {str(e)}",
+                    "done": True,
+                    "hidden": False
+                }
             )
             raise
 

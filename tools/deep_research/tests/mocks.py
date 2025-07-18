@@ -1,7 +1,7 @@
 # tools/deep_research/tests/mocks.py
 
 import json
-
+from event_management.event_emitter import EventEmitter
 
 NODE_START_EVENT_JSON = json.dumps({
   "type": "node_start",
@@ -311,7 +311,7 @@ WORKFLOW_FINISH_EVENT_JSON = json.dumps({
 })
 
 
-class MockEventEmitter:
+class MockEventEmitter(EventEmitter):
     def __init__(self, request_info_data):
         self._request_info = request_info_data # The data to be captured
 
@@ -330,4 +330,3 @@ class MockEventEmitter:
             def __init__(self, content):
                 self.cell_contents = content
         return (Cell(self._request_info),)
-        
