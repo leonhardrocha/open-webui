@@ -1,13 +1,14 @@
 # event_handler.py
-from typing import Dict, Any, Optional
-from .event_models import (
+from typing import Dict, Any
+from event_management.event_models import (
     DifyEvent, 
     NodeStartEvent, 
     NodeFinishEvent, 
+    IterationFinishEvent,
     WorkflowFinishEvent
 )
-from .event_emitter import EventEmitter
-from .event_handler_registry import IEventHandler
+from event_management.event_emitter import EventEmitter
+from event_management.event_handler_registry import IEventHandler
 
 class DifyEventHandler(IEventHandler):
     def __init__(self, event_emitter: EventEmitter):
@@ -15,7 +16,7 @@ class DifyEventHandler(IEventHandler):
         self.event_map = {
             "node_start": NodeStartEvent,
             "node_finish": NodeFinishEvent,
-            "iteration_finish": NodeFinishEvent,
+            "iteration_finish": IterationFinishEvent,
             "workflow_finish": WorkflowFinishEvent,
         }
         self.event_type_map = {}  # Initialize event_type_map

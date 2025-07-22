@@ -10,14 +10,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import pytest
 import json
 from datetime import datetime, timezone
-from typing import Dict, Any
 
 from event_management.event_models import (
     NodeStartEvent,
     NodeFinishEvent,
     WorkflowFinishEvent,
     NodeType,
-    NodeStatus
+    NodeStatus,
+    IterationFinishEvent
 )
 from event_management.dify_event_handler import DifyEventHandler
 from event_management.event_emitter import EventEmitter
@@ -46,7 +46,7 @@ TEST_EVENTS = [
     (NODE_FINISH_IF_ELSE_JSON, NodeFinishEvent, NodeType.IF_ELSE),
     (NODE_FINISH_VARIABLE_AGGREGATOR_JSON, NodeFinishEvent, NodeType.VARIABLE_AGGREGATOR),
     (NODE_FINISH_TEMPLATE_TRANSFORM_JSON, NodeFinishEvent, NodeType.TEMPLATE_TRANSFORM),
-    (ITERATION_FINISH_EVENT_JSON, NodeFinishEvent, NodeType.ITERATION),
+    (ITERATION_FINISH_EVENT_JSON, IterationFinishEvent, NodeType.ITERATION),
     (WORKFLOW_FINISH_EVENT_JSON, WorkflowFinishEvent, None)
 ]
 

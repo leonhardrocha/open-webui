@@ -120,8 +120,13 @@ class NodeStartEvent(BaseEvent):
     content: NodeStartContent
 
 class NodeFinishEvent(BaseEvent):
-    """Event triggered when a node finishes processing"""
-    type: Literal["node_finish", "iteration_finish"] = "node_finish"
+    """Event triggered when a regular node finishes processing"""
+    type: Literal["node_finish"] = "node_finish"
+    content: NodeFinishContent
+
+class IterationFinishEvent(BaseEvent):
+    """Event triggered when an iteration node finishes processing"""
+    type: Literal["iteration_finish"] = "iteration_finish"
     content: NodeFinishContent
 
 class WorkflowFinishContent(BaseModel):
@@ -155,25 +160,3 @@ class WorkflowFinishEvent(BaseEvent):
 
 # Union type for all Dify events
 DifyEvent = Union[NodeStartEvent, NodeFinishEvent, WorkflowFinishEvent]
-
-def parse_dify_event(event_data: Dict[str, Any]) -> DifyEvent:
-    """Parse raw event data into appropriate event model."""
-    event_map = {
-        "node_start": NodeStartEvent,
-        "node_finish": NodeFinishEvent,
-        "iteration_finish": NodeFinishEvent,
-        "workflow_finish": WorkflowFinishEvent,
-    }
-    
-    event_type = event_data.get("type")
-    if event_type not in event_map:
-        raise ValueError(f"Unknown event type: {event_type}")
-    
-    # Convert content to appropriate model
-    content_data = event_data.get("content", {})
-    if event_type == "node_start":
-        event_data["content"] = NodeStartContent(**content_data)
-    elif event_type in ["node_finish", "iteration_finish"]:
-        event_data["content"] = NodeFinishContent(**content_data)
-    
-    return event_map[event_type](**event_data)
